@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from closed_claw.runtime.protocol import (
+    AgentResponse,
+    ApiCallDecision,
+    ApiCallIntent,
+    CoordinatorRequest,
+    ToolCallIntent,
+    ToolCallResult,
+    parse_agent_line,
+)
+
+ApprovalCallback = Callable[[ApiCallIntent, str], Awaitable[ApiCallDecision]]
+ToolCallback = Callable[[ToolCallIntent, str], Awaitable[ToolCallResult]]
+
+
+class AgentRuntimeError(RuntimeError):
+    pass
+
+
+class AgentRunner:
+    def __init__(self, timeout_sec: int = 120, retries: int = 2) -> None:
+        self.timeout_sec = timeout_sec
+        self.retries = retries
+
+    async def run_agent(
+        self,
+        agent_id: str,
+        entrypoint: Path,
+        request: CoordinatorRequest,
+        approval_callback: ApprovalCallback,
+        tool_callback: ToolCallback,
+    ) -> AgentResponse:
+        last_error: Exception | None = None
+        for _ in range(self.retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self._run_once(agent_id, entrypoint, request, approval_callback, tool_callback),
+                    timeout=self.timeout_sec,
+                )
+            except Exception as exc:
+                last_error = exc
+        raise AgentRuntimeError(f"Agent {agent_id} failed after retries: {last_error}")
+
+    async def _run_once(
+        self,
+        agent_id: str,
+        entrypoint: Path,
+        request: CoordinatorRequest,
+        approval_callback: ApprovalCallback,
+        tool_callback: ToolCallback,
+    ) -> AgentResponse:
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(entrypoint),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdin and proc.stdout and proc.stderr
+
+        proc.stdin.write((request.model_dump_json() + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+
+        final: AgentResponse | None = None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            parsed = parse_agent_line(line.decode("utf-8"))
+            if isinstance(parsed, ApiCallIntent):
+                decision = await approval_callback(parsed, agent_id)
+                proc.stdin.write((decision.model_dump_json() + "\n").encode("utf-8"))
+                await proc.stdin.drain()
+                continue
+            if isinstance(parsed, ToolCallIntent):
+                result = await tool_callback(parsed, agent_id)
+                proc.stdin.write((result.model_dump_json() + "\n").encode("utf-8"))
+                await proc.stdin.drain()
+                continue
+            final = parsed
+            break
+
+        stderr = (await proc.stderr.read()).decode("utf-8").strip()
+        rc = await proc.wait()
+        if final is None:
+            raise AgentRuntimeError(
+                f"No valid final response from agent {agent_id}; rc={rc}, stderr={stderr}"
+            )
+        if final.metrics.latency_ms is None:
+            final.metrics.latency_ms = (time.time() - start) * 1000
+        if rc != 0 and final.status != "error":
+            raise AgentRuntimeError(f"Agent {agent_id} exited with code {rc}: {stderr}")
+        return final

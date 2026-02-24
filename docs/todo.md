@@ -5,3 +5,5 @@
 - Extend functionality with launching servers
 - Add playwright capabilities
 - Implement hard guardrails before deployment
+- Add a soul.md that is the personality giver to the coordinator node
+- Add a heartbeat? cron jobs

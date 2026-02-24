@@ -3,3 +3,4 @@
 - Deploy on laptop and get agents to work
 - Extend functionality to use external agents and other APIs
 - Extend functionality with launching servers
+- Add playwright capabilities

@@ -4,3 +4,4 @@
 - Extend functionality to use external agents and other APIs
 - Extend functionality with launching servers
 - Add playwright capabilities
+- Implement hard guardrails before deployment

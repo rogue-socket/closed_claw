@@ -1,3 +1,5 @@
+# Purpose: Embedding provider integration and vector generation helpers.
+
 from __future__ import annotations
 
 import hashlib
@@ -14,9 +16,11 @@ class EmbeddingProvider:
     _init_attempted: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Run post init."""
         self._model = None
 
     def embed(self, text: str) -> list[float]:
+        """Run embed."""
         if not self._init_attempted:
             self._init_attempted = True
             enabled = os.getenv("CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS", "false").lower()

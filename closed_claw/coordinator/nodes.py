@@ -1,3 +1,5 @@
+# Purpose: Coordinator node implementations for planning, execution, and auditing.
+
 from __future__ import annotations
 
 import asyncio
@@ -45,6 +47,7 @@ class CoordinatorNodes:
         approval_gate: ApprovalGate,
         audit: AuditStore,
     ) -> None:
+        """Initialize the instance."""
         self.settings = settings
         self.registry = registry
         self.reranker = reranker
@@ -53,25 +56,36 @@ class CoordinatorNodes:
         self.factory = factory
         self.approval_gate = approval_gate
         self.audit = audit
-        dynamic_roots = [self.settings.agents_dir.parent.parent] + self.settings.extra_allowed_paths
+
+        # If explicit allowed paths are configured, treat them as the authoritative
+        # filesystem sandbox roots for file_io/sql_query tools.
+        if self.settings.extra_allowed_paths:
+            workspace_root = self.settings.extra_allowed_paths[0]
+            dynamic_roots = self.settings.extra_allowed_paths
+        else:
+            workspace_root = self.settings.agents_dir.parent
+            dynamic_roots = [self.settings.agents_dir.parent.parent]
         self.tool_executor = ToolExecutor(
-            workspace_root=self.settings.agents_dir.parent,
+            workspace_root=workspace_root,
             allowed_roots=dynamic_roots,
         )
 
     @staticmethod
     def _merge(state: dict[str, Any], **updates: Any) -> dict[str, Any]:
+        """Run merge."""
         merged = dict(state)
         merged.update(updates)
         return merged
 
     def _emit_runlog(self, state: dict[str, Any], event: str, payload: dict[str, Any]) -> None:
+        """Run emit runlog."""
         run_id = state.get("run_id")
         if not run_id:
             return
         RunLogger(self.settings.run_logs_dir, run_id=run_id).emit(event, payload)
 
     async def ingest_task(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run ingest task."""
         task = state.get("task")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("Missing required field: task")
@@ -86,39 +100,52 @@ class CoordinatorNodes:
             tool_events=[],
             failed_agents=[],
             subtask_pool=[],
+            discovery_subtask_pool=[],
+            execution_subtask_pool=[],
             role_agent_map={},
+            discovery_results={},
+            execution_results={},
             subtask_results={},
         )
         self._emit_runlog(merged, "task_ingested", {"task": task, "session_id": merged["session_id"]})
         return merged
 
     async def decompose_task(self, state: dict[str, Any]) -> dict[str, Any]:
-        plan = generate_task_plan(self.settings, state["task"])
-        pool = [
-            {
-                **item,
-                "status": "waiting" if item.get("depends_on") else "pending",
-                "assigned_agent_id": None,
-                "result": "",
-                "error": "",
-            }
-            for item in plan
-        ]
-        merged = self._merge(state, subtask_pool=pool)
+        """Asynchronously run decompose task."""
+        plan = generate_task_plan(
+            self.settings,
+            state["task"],
+            phase="discovery",
+        )
+        discovery_pool = self._prepare_phase_pool(plan, phase="discovery")
+        merged = self._merge(
+            state,
+            discovery_subtask_pool=discovery_pool,
+            execution_subtask_pool=[],
+            discovery_results={},
+            execution_results={},
+            subtask_pool=discovery_pool,
+        )
         self._emit_runlog(
             merged,
             "task_plan_created",
-            {"subtask_count": len(pool), "subtasks": self._task_pool_snapshot(pool)},
+            {
+                "phase": "discovery",
+                "subtask_count": len(discovery_pool),
+                "subtasks": self._task_pool_snapshot(discovery_pool),
+            },
         )
-        self._emit_task_pool(merged, pool)
+        self._emit_task_pool(merged, discovery_pool, phase="discovery")
         return merged
 
     async def embed_task(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run embed task."""
         out = self._merge(state, query_vector=self.embedder.embed(state["task"]))
         self._emit_runlog(out, "task_embedded", {"embedding_dim": len(out["query_vector"])})
         return out
 
     async def semantic_search(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run semantic search."""
         candidates = self.registry.semantic_search(state["query_vector"], k=5)
         out = self._merge(
             state,
@@ -136,6 +163,7 @@ class CoordinatorNodes:
         return out
 
     async def llm_rerank(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run llm rerank."""
         sem = state.get("candidates", [])
         converted = [
             SearchCandidate(
@@ -157,6 +185,7 @@ class CoordinatorNodes:
         return merged
 
     async def human_gate_if_low_confidence(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run human gate if low confidence."""
         if not state.get("low_confidence", True):
             return self._merge(state, human_create_approved=False)
         if not self.settings.create_approval_required:
@@ -187,6 +216,7 @@ class CoordinatorNodes:
         return self._merge(state, human_create_approved=approved)
 
     async def decide_reuse_or_create(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run decide reuse or create."""
         candidates = state.get("candidates", [])
         if not candidates:
             return self._merge(state, decision="create")
@@ -196,6 +226,7 @@ class CoordinatorNodes:
         return self._merge(state, decision="reuse", selected_agent_id=top["agent_id"])
 
     async def create_agent_if_needed(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run create agent if needed."""
         if state["decision"] != "create":
             return state
         task = state["task"]
@@ -256,23 +287,7 @@ class CoordinatorNodes:
         return merged
 
     async def execute_task_pool(self, state: dict[str, Any]) -> dict[str, Any]:
-        pool = [dict(item) for item in state.get("subtask_pool", [])]
-        if not pool:
-            pool = [
-                {
-                    "task_id": "task-1",
-                    "title": "Execute User Task",
-                    "description": state["task"],
-                    "role_tag": "general-operator",
-                    "depends_on": [],
-                    "acceptance_criteria": ["Task is completed and reported."],
-                    "status": "pending",
-                    "assigned_agent_id": None,
-                    "result": "",
-                    "error": "",
-                }
-            ]
-
+        """Asynchronously run execute task pool."""
         approvals = list(state.get("approvals", []))
         tool_events = list(state.get("tool_events", []))
         api_mode = (state.get("runtime_policies", {}) or {}).get(
@@ -281,7 +296,219 @@ class CoordinatorNodes:
         role_agent_map: dict[str, str] = dict(state.get("role_agent_map", {}))
         created_agents: list[dict[str, Any]] = list(state.get("created_agents", []))
         subtask_results: dict[str, str] = dict(state.get("subtask_results", {}))
+        legacy_pool = [dict(item) for item in state.get("subtask_pool", [])]
+        has_discovery_pool = bool(state.get("discovery_subtask_pool", []))
+        has_execution_pool = bool(state.get("execution_subtask_pool", []))
+        legacy_execution_only = bool(legacy_pool) and not has_discovery_pool and not has_execution_pool
 
+        if legacy_execution_only:
+            for item in legacy_pool:
+                item.setdefault("phase", "execution")
+            execution_phase = await self._execute_phase_pool(
+                state=state,
+                phase="execution",
+                pool=legacy_pool,
+                discovery_results=dict(state.get("discovery_results", {})),
+                approvals=approvals,
+                tool_events=tool_events,
+                role_agent_map=role_agent_map,
+                created_agents=created_agents,
+                subtask_results=subtask_results,
+                api_mode=api_mode,
+            )
+            return self._merge(
+                state,
+                response_status=execution_phase["status"],
+                response_result=self._format_subtask_result_summary([execution_phase["pool"]]),
+                response_error=execution_phase["error"],
+                selected_agent_id=next(iter(role_agent_map.values()), state.get("selected_agent_id", "unknown")),
+                role_agent_map=role_agent_map,
+                created_agents=created_agents,
+                subtask_pool=execution_phase["pool"],
+                discovery_subtask_pool=[],
+                execution_subtask_pool=execution_phase["pool"],
+                discovery_results=dict(state.get("discovery_results", {})),
+                execution_results=execution_phase["phase_results"],
+                subtask_results=subtask_results,
+                approvals=approvals,
+                tool_events=tool_events,
+            )
+
+        discovery_pool = [dict(item) for item in state.get("discovery_subtask_pool", [])]
+        if not discovery_pool:
+            discovery_plan = generate_task_plan(
+                self.settings,
+                state["task"],
+                phase="discovery",
+            )
+            discovery_pool = self._prepare_phase_pool(discovery_plan, phase="discovery")
+            self._emit_runlog(
+                state,
+                "task_plan_created",
+                {
+                    "phase": "discovery",
+                    "subtask_count": len(discovery_pool),
+                    "subtasks": self._task_pool_snapshot(discovery_pool),
+                },
+            )
+            self._emit_task_pool(state, discovery_pool, phase="discovery")
+
+        discovery_phase = await self._execute_phase_pool(
+            state=state,
+            phase="discovery",
+            pool=discovery_pool,
+            discovery_results={},
+            approvals=approvals,
+            tool_events=tool_events,
+            role_agent_map=role_agent_map,
+            created_agents=created_agents,
+            subtask_results=subtask_results,
+            api_mode=api_mode,
+        )
+        discovery_results = discovery_phase["phase_results"]
+
+        if discovery_phase["status"] != "ok":
+            return self._merge(
+                state,
+                response_status="error",
+                response_result=self._format_subtask_result_summary([discovery_phase["pool"]]),
+                response_error=discovery_phase["error"],
+                selected_agent_id=next(iter(role_agent_map.values()), state.get("selected_agent_id", "unknown")),
+                role_agent_map=role_agent_map,
+                created_agents=created_agents,
+                subtask_pool=discovery_phase["pool"],
+                discovery_subtask_pool=discovery_phase["pool"],
+                execution_subtask_pool=[],
+                discovery_results=discovery_results,
+                execution_results={},
+                subtask_results=subtask_results,
+                approvals=approvals,
+                tool_events=tool_events,
+            )
+
+        execution_plan = generate_task_plan(
+            self.settings,
+            state["task"],
+            phase="execution",
+            discovery_results=discovery_results,
+        )
+        execution_pool = self._prepare_phase_pool(execution_plan, phase="execution")
+        self._emit_runlog(
+            state,
+            "task_plan_created",
+            {
+                "phase": "execution",
+                "subtask_count": len(execution_pool),
+                "subtasks": self._task_pool_snapshot(execution_pool),
+            },
+        )
+        self._emit_task_pool(state, execution_pool, phase="execution")
+        execution_phase = await self._execute_phase_pool(
+            state=state,
+            phase="execution",
+            pool=execution_pool,
+            discovery_results=discovery_results,
+            approvals=approvals,
+            tool_events=tool_events,
+            role_agent_map=role_agent_map,
+            created_agents=created_agents,
+            subtask_results=subtask_results,
+            api_mode=api_mode,
+        )
+
+        combined_pool = [*discovery_phase["pool"], *execution_phase["pool"]]
+        return self._merge(
+            state,
+            response_status=execution_phase["status"],
+            response_result=self._format_subtask_result_summary(
+                [discovery_phase["pool"], execution_phase["pool"]]
+            ),
+            response_error=execution_phase["error"],
+            selected_agent_id=next(iter(role_agent_map.values()), state.get("selected_agent_id", "unknown")),
+            role_agent_map=role_agent_map,
+            created_agents=created_agents,
+            subtask_pool=combined_pool,
+            discovery_subtask_pool=discovery_phase["pool"],
+            execution_subtask_pool=execution_phase["pool"],
+            discovery_results=discovery_results,
+            execution_results=execution_phase["phase_results"],
+            subtask_results=subtask_results,
+            approvals=approvals,
+            tool_events=tool_events,
+        )
+
+    def _prepare_phase_pool(self, plan: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
+        """Run prepare phase pool."""
+        prefix = "discover" if phase == "discovery" else "execute"
+        id_map: dict[str, str] = {}
+        used_ids: set[str] = set()
+        for index, item in enumerate(plan, start=1):
+            original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
+            base = original if original.startswith(f"{prefix}-") else f"{prefix}-{original}"
+            task_id = base
+            suffix = 2
+            while task_id in used_ids:
+                task_id = f"{base}-{suffix}"
+                suffix += 1
+            used_ids.add(task_id)
+            id_map[original] = task_id
+
+        pool: list[dict[str, Any]] = []
+        for index, item in enumerate(plan, start=1):
+            original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
+            task_id = id_map[original]
+            deps = []
+            for dep in item.get("depends_on", []) or []:
+                if dep in id_map:
+                    deps.append(id_map[dep])
+            pool.append(
+                {
+                    **item,
+                    "task_id": task_id,
+                    "depends_on": deps,
+                    "phase": phase,
+                    "status": "waiting" if deps else "pending",
+                    "assigned_agent_id": None,
+                    "result": "",
+                    "error": "",
+                }
+            )
+        return pool
+
+    @staticmethod
+    def _format_subtask_result_summary(pools: list[list[dict[str, Any]]]) -> str:
+        """Run format subtask result summary."""
+        completed: list[dict[str, Any]] = []
+        for pool in pools:
+            completed.extend([item for item in pool if item.get("status") == "completed"])
+        if not completed:
+            return ""
+        return "\n".join(
+            [
+                "Sub-task results:",
+                *[
+                    f"- [{item.get('phase','task')}/{item.get('task_id','')}] "
+                    f"({item.get('role_tag','')}) {item.get('title','')}: {item.get('result','')}"
+                    for item in completed
+                ],
+            ]
+        )
+
+    async def _execute_phase_pool(
+        self,
+        *,
+        state: dict[str, Any],
+        phase: str,
+        pool: list[dict[str, Any]],
+        discovery_results: dict[str, str],
+        approvals: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]],
+        role_agent_map: dict[str, str],
+        created_agents: list[dict[str, Any]],
+        subtask_results: dict[str, str],
+        api_mode: str,
+    ) -> dict[str, Any]:
+        """Asynchronously run execute phase pool."""
         by_id = {item["task_id"]: item for item in pool}
         waiting_cycles = 0
         while True:
@@ -290,11 +517,11 @@ class CoordinatorNodes:
                     if item["status"] in {"waiting", "pending"}:
                         item["status"] = "cancelled"
                         item["error"] = "cancelled_by_user"
-                self._emit_task_pool(state, pool)
+                self._emit_task_pool(state, pool, phase=phase)
                 self._emit_runlog(
                     state,
                     "run_cancelled",
-                    {"reason": "cancel_file_detected"},
+                    {"phase": phase, "reason": "cancel_file_detected"},
                 )
                 break
 
@@ -319,16 +546,9 @@ class CoordinatorNodes:
             ready = [t for t in pool if t["status"] == "pending"]
             for item in ready:
                 progressed = True
-                role_tag = str(item.get("role_tag", "general-operator")) or "general-operator"
-                if role_tag not in role_agent_map:
-                    agent_id, created = self._acquire_agent_for_role(role_tag, item)
-                    role_agent_map[role_tag] = agent_id
-                    if created:
-                        created_agents.append(created)
-                agent_id = role_agent_map[role_tag]
-                item["assigned_agent_id"] = agent_id
+                role_tag = str(item.get("role_tag", "task-operator")) or "task-operator"
                 item["status"] = "in_progress"
-                self._emit_task_pool(state, pool)
+                self._emit_task_pool(state, pool, phase=phase)
 
                 dep_context = {
                     dep: by_id[dep].get("result", "")
@@ -341,69 +561,139 @@ class CoordinatorNodes:
                     "Acceptance criteria:\n"
                     + "\n".join(f"- {c}" for c in criteria)
                 ).strip()
-                req = CoordinatorRequest(
-                    session_id=state["session_id"],
-                    task=task_payload,
-                    context={
-                        **(state.get("context", {}) or {}),
-                        "parent_task": state["task"],
-                        "subtask": {
-                            "task_id": item["task_id"],
-                            "title": item.get("title", ""),
-                            "role_tag": role_tag,
-                            "depends_on_results": dep_context,
-                        },
-                    },
-                    config=self._request_config_for_agent(agent_id),
-                )
-                entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
-                tool_events_start = len(tool_events)
-                try:
-                    response = await self.runner.run_agent(
-                        agent_id=agent_id,
-                        entrypoint=entrypoint,
-                        request=req,
-                        approval_callback=lambda intent, a_id: self._approval_callback(
-                            intent=intent,
-                            agent_id=a_id,
-                            run_id=state["run_id"],
-                            approvals=approvals,
-                            mode=api_mode,
-                        ),
-                        tool_callback=lambda intent, a_id: self._tool_callback(
-                            intent=intent,
-                            agent_id=a_id,
-                            run_id=state["run_id"],
-                            tool_events=tool_events,
-                        ),
+                max_attempts = max(1, int(self.settings.subtask_max_attempts))
+                attempt_failures: list[str] = []
+                item["attempts"] = 0
+
+                for attempt_idx in range(1, max_attempts + 1):
+                    item["attempts"] = attempt_idx
+                    if self._is_cancel_requested(state["run_id"]):
+                        item["status"] = "cancelled"
+                        item["error"] = "cancelled_by_user"
+                        break
+
+                    if role_tag not in role_agent_map:
+                        agent_id, created = self._acquire_agent_for_role(role_tag, item)
+                        role_agent_map[role_tag] = agent_id
+                        if created:
+                            created_agents.append(created)
+                    agent_id = role_agent_map[role_tag]
+                    item["assigned_agent_id"] = agent_id
+
+                    attempt_task_payload = (
+                        f"Subtask attempt {attempt_idx}/{max_attempts}.\n"
+                        f"{task_payload}"
                     )
-                    if response.status == "ok":
-                        new_events = tool_events[tool_events_start:]
-                        verification_ok, verification_msg = self._verify_subtask_tool_execution(
-                            item=item,
-                            new_tool_events=new_events,
+                    req = CoordinatorRequest(
+                        session_id=state["session_id"],
+                        task=attempt_task_payload,
+                        context={
+                            **(state.get("context", {}) or {}),
+                            "parent_task": state["task"],
+                            "task_phase": phase,
+                            "discovery_results": discovery_results,
+                            "subtask": {
+                                "task_id": item["task_id"],
+                                "title": item.get("title", ""),
+                                "phase": phase,
+                                "role_tag": role_tag,
+                                "depends_on_results": dep_context,
+                                "attempt": attempt_idx,
+                                "max_attempts": max_attempts,
+                                "prior_failures": list(attempt_failures),
+                            },
+                        },
+                        config=self._request_config_for_agent(agent_id),
+                    )
+                    entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
+                    tool_events_start = len(tool_events)
+                    self._emit_runlog(
+                        state,
+                        "subtask_attempt_started",
+                        {
+                            "phase": phase,
+                            "task_id": item.get("task_id"),
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
+                            "agent_id": agent_id,
+                        },
+                    )
+                    try:
+                        response = await self.runner.run_agent(
+                            agent_id=agent_id,
+                            entrypoint=entrypoint,
+                            request=req,
+                            approval_callback=lambda intent, a_id: self._approval_callback(
+                                intent=intent,
+                                agent_id=a_id,
+                                run_id=state["run_id"],
+                                approvals=approvals,
+                                mode=api_mode,
+                            ),
+                            tool_callback=lambda intent, a_id: self._tool_callback(
+                                intent=intent,
+                                agent_id=a_id,
+                                run_id=state["run_id"],
+                                tool_events=tool_events,
+                            ),
                         )
-                        if verification_ok:
-                            item["status"] = "completed"
-                            item["result"] = response.result
-                            subtask_results[item["task_id"]] = response.result
+                        if response.status == "ok":
+                            new_events = tool_events[tool_events_start:]
+                            verification_ok, verification_msg = self._verify_subtask_tool_execution(
+                                item=item,
+                                new_tool_events=new_events,
+                            )
+                            if verification_ok:
+                                item["status"] = "completed"
+                                item["error"] = ""
+                                item["result"] = response.result
+                                subtask_results[item["task_id"]] = response.result
+                                subtask_results[f"{phase}.{item['task_id']}"] = response.result
+                                self._emit_runlog(
+                                    state,
+                                    "subtask_attempt_succeeded",
+                                    {
+                                        "phase": phase,
+                                        "task_id": item.get("task_id"),
+                                        "attempt": attempt_idx,
+                                        "agent_id": agent_id,
+                                    },
+                                )
+                                break
+                            failure_reason = verification_msg or "filesystem_verification_failed"
                         else:
-                            item["status"] = "failed"
-                            item["error"] = verification_msg or "filesystem_verification_failed"
-                    else:
+                            failure_reason = response.error_message or "subtask_failed"
+                    except AgentRuntimeError as exc:
+                        failure_reason = str(exc)
+
+                    attempt_failures.append(failure_reason)
+                    self._emit_runlog(
+                        state,
+                        "subtask_attempt_failed",
+                        {
+                            "phase": phase,
+                            "task_id": item.get("task_id"),
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
+                            "agent_id": agent_id,
+                            "error": failure_reason,
+                        },
+                    )
+                    if attempt_idx >= max_attempts:
                         item["status"] = "failed"
-                        item["error"] = response.error_message or "subtask_failed"
-                except AgentRuntimeError as exc:
+                        item["error"] = failure_reason
+
+                if item["status"] not in {"completed", "failed", "cancelled"}:
                     item["status"] = "failed"
-                    item["error"] = str(exc)
-                self._emit_task_pool(state, pool)
+                    item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
+                self._emit_task_pool(state, pool, phase=phase)
 
             if progressed:
                 waiting_cycles = 0
                 continue
 
             waiting_cycles += 1
-            self._emit_task_pool(state, pool)
+            self._emit_task_pool(state, pool, phase=phase)
             if waiting_cycles >= 2:
                 for item in pool:
                     if item["status"] in {"waiting", "pending"}:
@@ -416,42 +706,21 @@ class CoordinatorNodes:
         failed = [t for t in pool if t["status"] in {"failed", "cancelled"}]
         cancelled = [t for t in pool if t["status"] == "cancelled"]
         status = "ok" if not failed else "error"
-        if completed:
-            result = "\n".join(
-                [
-                    "Sub-task results:",
-                    *[
-                        f"- [{t['task_id']}] ({t.get('role_tag','')}) {t.get('title','')}: {t.get('result','')}"
-                        for t in completed
-                    ],
-                ]
-            )
+        if status == "ok":
+            error = ""
+        elif cancelled:
+            error = "cancelled_by_user"
         else:
-            result = ""
-
-        return self._merge(
-            state,
-            response_status=status,
-            response_result=result,
-            response_error=(
-                ""
-                if status == "ok"
-                else (
-                    "cancelled_by_user"
-                    if cancelled
-                    else "One or more subtasks failed"
-                )
-            ),
-            selected_agent_id=next(iter(role_agent_map.values()), state.get("selected_agent_id", "unknown")),
-            role_agent_map=role_agent_map,
-            created_agents=created_agents,
-            subtask_pool=pool,
-            subtask_results=subtask_results,
-            approvals=approvals,
-            tool_events=tool_events,
-        )
+            error = f"{phase}_phase_failed"
+        return {
+            "pool": pool,
+            "phase_results": {item["task_id"]: item.get("result", "") for item in completed},
+            "status": status,
+            "error": error,
+        }
 
     def _select_capability_profile(self, task: str) -> dict[str, Any]:
+        """Run select capability profile."""
         return generate_agent_profile(
             settings=self.settings,
             task=task,
@@ -461,6 +730,7 @@ class CoordinatorNodes:
 
     def _find_reusable_capability_agent(self, profile: dict[str, Any]) -> str | None:
         # Reuse by capability first to avoid creating niche one-off agents.
+        """Run find reusable capability agent."""
         query_vector = self.embedder.embed(profile["description"])
         candidates = self.registry.semantic_search(query_vector, k=10)
         profile_id = str(profile.get("profile_id", ""))
@@ -478,6 +748,7 @@ class CoordinatorNodes:
         role_tag: str,
         subtask: dict[str, Any],
     ) -> tuple[str, dict[str, Any] | None]:
+        """Run acquire agent for role."""
         role_prompt = (
             f"Role tag: {role_tag}. "
             f"Subtask title: {subtask.get('title', '')}. "
@@ -518,6 +789,7 @@ class CoordinatorNodes:
         return manifest.agent_id, created_agent
 
     def _task_pool_snapshot(self, pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Run task pool snapshot."""
         return [
             {
                 "task_id": item.get("task_id"),
@@ -531,18 +803,29 @@ class CoordinatorNodes:
             for item in pool
         ]
 
-    def _emit_task_pool(self, state: dict[str, Any], pool: list[dict[str, Any]]) -> None:
+    def _emit_task_pool(
+        self,
+        state: dict[str, Any],
+        pool: list[dict[str, Any]],
+        phase: str | None = None,
+    ) -> None:
+        """Run emit task pool."""
+        payload: dict[str, Any] = {"tasks": self._task_pool_snapshot(pool)}
+        if phase:
+            payload["phase"] = phase
         self._emit_runlog(
             state,
             "task_pool_update",
-            {"tasks": self._task_pool_snapshot(pool)},
+            payload,
         )
 
     def _is_cancel_requested(self, run_id: str) -> bool:
+        """Run is cancel requested."""
         cancel_path = self.settings.run_logs_dir / f"{run_id}.cancel"
         return cancel_path.exists()
 
     async def dispatch_agents_async(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run dispatch agents async."""
         selected = state["selected_agent_id"]
         candidate_ids = [selected] + [
             c["agent_id"]
@@ -634,6 +917,7 @@ class CoordinatorNodes:
         return merged
 
     async def validate_outputs(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run validate outputs."""
         if state.get("response_status") not in {"ok", "error"}:
             return self._merge(
                 state,
@@ -643,12 +927,15 @@ class CoordinatorNodes:
         return state
 
     async def approval_gate_for_api_calls(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run approval gate for api calls."""
         return state
 
     async def continue_or_deny_api_path(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run continue or deny api path."""
         return state
 
     async def update_registry_and_audit(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run update registry and audit."""
         self.registry.record_run(
             run_id=state["run_id"],
             agent_id=state.get("selected_agent_id", "unknown"),
@@ -679,6 +966,7 @@ class CoordinatorNodes:
         return state
 
     async def synthesize_final_response(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run synthesize final response."""
         if state.get("response_status") == "ok":
             return self._merge(state, response_result=state.get("response_result", ""))
         return self._merge(
@@ -690,6 +978,7 @@ class CoordinatorNodes:
         )
 
     async def failure_recovery(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Asynchronously run failure recovery."""
         return state
 
     async def _approval_callback(
@@ -700,6 +989,7 @@ class CoordinatorNodes:
         approvals: list[dict[str, Any]],
         mode: str,
     ) -> ApiCallDecision:
+        """Asynchronously run approval callback."""
         if intent.call_type == "external_paid_api" and intent.provider not in self.settings.paid_api_providers:
             decision = ApiCallDecision(approved=True, note="provider_not_marked_paid")
             approvals.append(
@@ -765,6 +1055,7 @@ class CoordinatorNodes:
         run_id: str,
         tool_events: list[dict[str, Any]],
     ) -> ToolCallResult:
+        """Asynchronously run tool callback."""
         manifest = self.registry.get_manifest(agent_id)
         allowlist = manifest.tools_allowlist if manifest else []
         try:
@@ -841,6 +1132,7 @@ class CoordinatorNodes:
             return ToolCallResult(ok=False, result={}, error=str(exc))
 
     def _sync_registry_index(self) -> None:
+        """Run sync registry index."""
         manifests: list[AgentManifest] = []
         for path in self.settings.agents_dir.glob("*/manifest.json"):
             try:
@@ -851,6 +1143,7 @@ class CoordinatorNodes:
         AgentFactory.save_registry_index(self.settings.agents_dir / "registry.json", manifests)
 
     def _request_config_for_agent(self, agent_id: str) -> dict[str, Any]:
+        """Run request config for agent."""
         manifest = self.registry.get_manifest(agent_id)
         allowlist = manifest.tools_allowlist if manifest else []
         return {
@@ -863,6 +1156,7 @@ class CoordinatorNodes:
         }
 
     def _llm_runtime_config(self) -> dict[str, Any]:
+        """Run llm runtime config."""
         provider = self.settings.llm_provider.lower()
         key = self.settings.llm_api_key.strip()
         base_url = ""
@@ -888,6 +1182,7 @@ class CoordinatorNodes:
         item: dict[str, Any],
         new_tool_events: list[dict[str, Any]],
     ) -> tuple[bool, str]:
+        """Run verify subtask tool execution."""
         if not bool(item.get("requires_tool", False)):
             return True, ""
         if not new_tool_events:
@@ -899,6 +1194,7 @@ class CoordinatorNodes:
 
     @staticmethod
     def _evaluate_tool_result(tool: str, args: dict[str, Any], result: dict[str, Any]) -> tuple[bool, str]:
+        """Run evaluate tool result."""
         if tool in {"terminal", "python_exec"}:
             rc = int(result.get("returncode", 1))
             return (rc == 0, result.get("stderr", "") if rc != 0 else "")
@@ -911,9 +1207,14 @@ class CoordinatorNodes:
             if op == "read":
                 return ("content" in result, "missing_content" if "content" not in result else "")
             if op == "write":
-                return (bool(result.get("written")), "write_failed")
+                ok = bool(result.get("written"))
+                return (ok, "" if ok else "write_failed")
             if op == "append":
-                return (bool(result.get("appended")), "append_failed")
+                ok = bool(result.get("appended"))
+                return (ok, "" if ok else "append_failed")
+            if op == "list":
+                ok = isinstance(result.get("entries"), list)
+                return (ok, "" if ok else "list_failed")
             return (True, "")
         if tool == "sql_query":
             return ("rows" in result, "sql_query_missing_rows")

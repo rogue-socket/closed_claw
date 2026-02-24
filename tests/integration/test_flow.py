@@ -1,3 +1,5 @@
+# Purpose: Integration tests for flow.
+
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +15,7 @@ from closed_claw.coordinator.graph import build_graph
 
 
 def test_end_to_end_flow_with_approval(monkeypatch, tmp_path: Path):
+    """Test end to end flow with approval."""
     monkeypatch.setenv("CLOSED_CLAW_DB_PATH", str(tmp_path / "registry.db"))
     monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", str(tmp_path / "agents"))
     monkeypatch.setenv("CLOSED_CLAW_EMBEDDING_DIM", "8")
@@ -26,6 +29,7 @@ def test_end_to_end_flow_with_approval(monkeypatch, tmp_path: Path):
     graph = build_graph(settings)
 
     async def run_once() -> dict:
+        """Test run once."""
         return await graph.ainvoke({"task": "please use paid_api for analysis", "context": {}})
 
     result = asyncio.run(run_once())

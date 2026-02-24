@@ -1,3 +1,5 @@
+# Purpose: JSON line protocol models exchanged between coordinator and agents.
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -57,6 +59,7 @@ class AgentResponse(BaseModel):
 
 
 def parse_agent_line(line: str) -> ApiCallIntent | ToolCallIntent | AgentResponse:
+    """Run parse agent line."""
     data = line.strip()
     if not data:
         raise ValueError("empty agent output")

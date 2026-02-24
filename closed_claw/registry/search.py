@@ -1,3 +1,5 @@
+# Purpose: Agent reranking, profile generation, and task planning utilities.
+
 from __future__ import annotations
 
 import json
@@ -18,25 +20,22 @@ class RerankedCandidate:
 
 class RerankerProtocol(Protocol):
     def rerank(self, task: str, candidates: list[SearchCandidate]) -> list[RerankedCandidate]:
+        """Run rerank."""
         ...
 
 
 class HeuristicReranker:
     def rerank(self, task: str, candidates: list[SearchCandidate]) -> list[RerankedCandidate]:
-        task_terms = set(task.lower().split())
-        out: list[RerankedCandidate] = []
-        for cand in candidates:
-            overlap = len(task_terms.intersection(set(cand.description.lower().split())))
-            boosted = cand.score + (overlap * 0.02)
-            out.append(
-                RerankedCandidate(
-                    agent_id=cand.agent_id,
-                    score=min(1.0, boosted),
-                    reason=f"semantic+term_overlap({overlap})",
-                )
+        """Run rerank."""
+        out = [
+            RerankedCandidate(
+                agent_id=cand.agent_id,
+                score=max(0.0, min(1.0, cand.score)),
+                reason="semantic_score",
             )
-        out.sort(key=lambda item: item.score, reverse=True)
-        return out
+            for cand in candidates
+        ]
+        return sorted(out, key=lambda item: item.score, reverse=True)
 
 
 class LLMReranker:
@@ -49,6 +48,7 @@ class LLMReranker:
         base_url: str,
         fallback: RerankerProtocol | None = None,
     ) -> None:
+        """Initialize the instance."""
         self.provider = provider
         self.model = model
         self.api_key = api_key
@@ -57,6 +57,7 @@ class LLMReranker:
         self.fallback = fallback or HeuristicReranker()
 
     def rerank(self, task: str, candidates: list[SearchCandidate]) -> list[RerankedCandidate]:
+        """Run rerank."""
         if not candidates:
             return []
         try:
@@ -71,6 +72,7 @@ class LLMReranker:
         return [RerankedCandidate(agent_id=c.agent_id, score=c.score, reason=f"llm_fallback:{c.reason}") for c in out]
 
     def _call_provider(self, task: str, candidates: list[SearchCandidate]) -> str:
+        """Run call provider."""
         if self.provider == "openai":
             return self._call_openai(task, candidates)
         if self.provider == "gemini":
@@ -80,6 +82,7 @@ class LLMReranker:
         raise ValueError(f"unsupported llm provider: {self.provider}")
 
     def _prompt(self, task: str, candidates: list[SearchCandidate]) -> str:
+        """Run prompt."""
         payload = [
             {"agent_id": c.agent_id, "semantic_score": c.score, "description": c.description}
             for c in candidates
@@ -93,6 +96,7 @@ class LLMReranker:
         )
 
     def _call_openai(self, task: str, candidates: list[SearchCandidate]) -> str:
+        """Run call openai."""
         import httpx
 
         url = f"{self.base_url}/v1/chat/completions"
@@ -112,6 +116,7 @@ class LLMReranker:
         return data["choices"][0]["message"]["content"]
 
     def _call_gemini(self, task: str, candidates: list[SearchCandidate]) -> str:
+        """Run call gemini."""
         import httpx
 
         url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
@@ -127,6 +132,7 @@ class LLMReranker:
         return data["candidates"][0]["content"]["parts"][0]["text"]
 
     def _call_claude(self, task: str, candidates: list[SearchCandidate]) -> str:
+        """Run call claude."""
         import httpx
 
         url = f"{self.base_url}/v1/messages"
@@ -150,6 +156,7 @@ class LLMReranker:
         return "\n".join(text_parts)
 
     def _parse_output(self, text: str, candidates: list[SearchCandidate]) -> list[RerankedCandidate]:
+        """Run parse output."""
         payload = _extract_json(text)
         if isinstance(payload, dict):
             rankings = payload.get("rankings", [])
@@ -196,10 +203,11 @@ def generate_agent_profile(
     supported_tools: list[str],
     fallback_tools: list[str],
 ) -> dict[str, Any]:
+    """Run generate agent profile."""
     provider = settings.llm_provider.lower()
     key, base = _provider_key_and_base(settings, provider)
     if provider == "heuristic" or not key:
-        return _heuristic_agent_profile(task, supported_tools, fallback_tools)
+        return _default_agent_profile(task, supported_tools, fallback_tools)
 
     prompt = (
         "You create reusable capability profiles for specialist agents.\n"
@@ -237,10 +245,11 @@ def generate_agent_profile(
                 return profile
     except Exception:
         pass
-    return _heuristic_agent_profile(task, supported_tools, fallback_tools)
+    return _default_agent_profile(task, supported_tools, fallback_tools)
 
 
 def _extract_json(text: str) -> Any:
+    """Run extract json."""
     text = text.strip()
     if not text:
         return {}
@@ -258,6 +267,7 @@ def _extract_json(text: str) -> Any:
 
 
 def build_reranker(settings: Settings) -> RerankerProtocol:
+    """Run build reranker."""
     provider = settings.llm_provider.lower()
     if provider == "heuristic":
         return HeuristicReranker()
@@ -289,6 +299,7 @@ def build_reranker(settings: Settings) -> RerankerProtocol:
 
 
 def generate_agent_description(settings: Settings, task: str) -> str:
+    """Run generate agent description."""
     task = task.strip()
     heuristic = f"Specialist for tasks similar to: {task[:120]}"
     provider = settings.llm_provider.lower()
@@ -379,29 +390,31 @@ def generate_agent_description(settings: Settings, task: str) -> str:
 
 
 def _clean_description(text: str, fallback: str) -> str:
+    """Run clean description."""
     clean = " ".join((text or "").strip().split())
     if not clean:
         return fallback
     return clean[:200]
 
 
-def generate_task_plan(settings: Settings, task: str) -> list[dict[str, Any]]:
+def generate_task_plan(
+    settings: Settings,
+    task: str,
+    *,
+    phase: str = "execution",
+    discovery_results: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Run generate task plan."""
+    phase_name = "discovery" if phase == "discovery" else "execution"
     provider = settings.llm_provider.lower()
     key, base = _provider_key_and_base(settings, provider)
     if provider == "heuristic" or not key:
-        return _heuristic_task_plan(task)
+        return _default_task_plan(task, phase=phase_name)
 
-    prompt = (
-        "You are a planning supervisor for multi-agent execution.\n"
-        "Return JSON only with shape:\n"
-        "{\"subtasks\":[{\"task_id\":str,\"title\":str,\"description\":str,\"role_tag\":str,"
-        "\"depends_on\":[str],\"acceptance_criteria\":[str],\"requires_tool\":bool}]}\n"
-        "Rules:\n"
-        "- Decompose into atomic tasks.\n"
-        "- Prefer independent tasks; only include dependencies when unavoidable.\n"
-        "- role_tag should be reusable capability labels (not person names).\n"
-        "- each acceptance_criteria entry must be verifiable.\n"
-        f"Task: {task.strip()}"
+    prompt = _task_plan_prompt(
+        task=task,
+        phase=phase_name,
+        discovery_results=discovery_results or {},
     )
     try:
         text = _generate_text_with_provider(
@@ -421,10 +434,45 @@ def generate_task_plan(settings: Settings, task: str) -> list[dict[str, Any]]:
                 return tasks
     except Exception:
         pass
-    return _heuristic_task_plan(task)
+    return _default_task_plan(task, phase=phase_name)
+
+
+def _task_plan_prompt(task: str, phase: str, discovery_results: dict[str, str]) -> str:
+    """Run task plan prompt."""
+    base = (
+        "You are a planning supervisor for multi-agent execution.\n"
+        "Return JSON only with shape:\n"
+        "{\"subtasks\":[{\"task_id\":str,\"title\":str,\"description\":str,\"role_tag\":str,"
+        "\"depends_on\":[str],\"acceptance_criteria\":[str],\"requires_tool\":bool}]}\n"
+        "Rules:\n"
+        "- Decompose into atomic tasks.\n"
+        "- Prefer independent tasks; only include dependencies when unavoidable.\n"
+        "- role_tag should be reusable capability labels (not person names).\n"
+        "- each acceptance_criteria entry must be verifiable.\n"
+    )
+    if phase == "discovery":
+        return (
+            base
+            + "Current phase: discovery.\n"
+            + "- Only include information-gathering and verification tasks.\n"
+            + "- Discovery outputs should be concrete facts execution can consume directly.\n"
+            + "- Do not include implementation/build/persist tasks in this phase.\n"
+            + f"Task: {task.strip()}"
+        )
+    discovery_json = json.dumps(discovery_results, ensure_ascii=True)
+    return (
+        base
+        + "Current phase: execution.\n"
+        + "- Assume discovery phase is complete and reliable.\n"
+        + "- Use discovery findings to plan only implementation/persistence/validation work.\n"
+        + "- Do not plan additional discovery unless discovery findings explicitly show a blocking gap.\n"
+        + f"Discovery findings: {discovery_json}\n"
+        + f"Task: {task.strip()}"
+    )
 
 
 def _provider_key_and_base(settings: Settings, provider: str) -> tuple[str, str]:
+    """Run provider key and base."""
     key = settings.llm_api_key.strip()
     if provider == "openai":
         key = key or settings.openai_api_key.strip()
@@ -449,6 +497,7 @@ def _generate_text_with_provider(
     max_tokens: int,
     temperature: float,
 ) -> str:
+    """Run generate text with provider."""
     import httpx
 
     if provider == "openai":
@@ -512,6 +561,7 @@ def _normalize_profile_payload(
     supported_tools: list[str],
     fallback_tools: list[str],
 ) -> dict[str, Any]:
+    """Run normalize profile payload."""
     raw_name = _clean_text(str(payload.get("name_prefix", "")), default="Task Operator", max_len=60)
     name_prefix = _to_title_words(raw_name) or "Task Operator"
     raw_desc = _clean_text(
@@ -560,21 +610,12 @@ def _normalize_profile_payload(
     }
 
 
-def _heuristic_agent_profile(task: str, supported_tools: list[str], fallback_tools: list[str]) -> dict[str, Any]:
-    terms = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", task.lower())
-    uniq: list[str] = []
-    for term in terms:
-        if term in {"please", "could", "would", "should", "using", "with", "from", "that", "this"}:
-            continue
-        if term not in uniq:
-            uniq.append(term)
-        if len(uniq) >= 2:
-            break
-    topic = " ".join(uniq).strip() or "Task"
-    name_prefix = f"{_to_title_words(topic)} Operator".strip()
-    description = f"Reusable capability operator for {task.strip()[:140]}"
+def _default_agent_profile(task: str, supported_tools: list[str], fallback_tools: list[str]) -> dict[str, Any]:
+    """Run default agent profile."""
+    name_prefix = "Task Operator"
+    description = f"Reusable capability operator for task: {task.strip()[:140]}"
     tools = [t for t in fallback_tools if t in supported_tools] or ["terminal"]
-    profile_id = _slug(name_prefix)
+    profile_id = "task-operator"
     return {
         "profile_id": profile_id,
         "name_prefix": name_prefix,
@@ -592,16 +633,19 @@ def _heuristic_agent_profile(task: str, supported_tools: list[str], fallback_too
 
 
 def _slug(value: str) -> str:
+    """Run slug."""
     clean = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return clean[:64]
 
 
 def _to_title_words(value: str) -> str:
+    """Run to title words."""
     parts = [p for p in re.split(r"[^a-zA-Z0-9]+", value) if p]
     return " ".join(p.capitalize() for p in parts[:5])
 
 
 def _clean_text(value: str, default: str, max_len: int) -> str:
+    """Run clean text."""
     clean = " ".join((value or "").strip().split())
     if not clean:
         clean = default
@@ -609,6 +653,7 @@ def _clean_text(value: str, default: str, max_len: int) -> str:
 
 
 def _normalize_plan_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run normalize plan payload."""
     items = payload.get("subtasks", [])
     if not isinstance(items, list):
         return []
@@ -627,7 +672,7 @@ def _normalize_plan_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
         title = _clean_text(str(item.get("title", "")), f"Subtask {i}", 80)
         desc = _clean_text(str(item.get("description", "")), title, 260)
-        role_tag = _slug(str(item.get("role_tag", ""))) or "general-operator"
+        role_tag = _slug(str(item.get("role_tag", ""))) or "task-operator"
         depends_on_raw = item.get("depends_on", [])
         depends_on = [
             _slug(str(dep))
@@ -660,14 +705,33 @@ def _normalize_plan_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _heuristic_task_plan(task: str) -> list[dict[str, Any]]:
+def _default_task_plan(task: str, *, phase: str = "execution") -> list[dict[str, Any]]:
+    """Run default task plan."""
     clean_task = _clean_text(task, "Execute task", 260)
+    if phase == "discovery":
+        return [
+            {
+                "task_id": "collect-required-context",
+                "title": "Collect Required Context",
+                "description": (
+                    "Gather and verify any concrete context needed to execute the user task safely, "
+                    f"including relevant paths, files, prerequisites, and constraints. Task: {clean_task}"
+                ),
+                "role_tag": "context-discoverer",
+                "depends_on": [],
+                "acceptance_criteria": [
+                    "All prerequisite context needed for execution is explicitly captured.",
+                    "Any blockers or missing information are clearly identified.",
+                ],
+                "requires_tool": True,
+            }
+        ]
     return [
         {
-            "task_id": "task-1",
+            "task_id": "execute-task",
             "title": "Execute User Task",
             "description": clean_task,
-            "role_tag": "general-operator",
+            "role_tag": "task-operator",
             "depends_on": [],
             "acceptance_criteria": [
                 "All explicit user requirements are addressed.",

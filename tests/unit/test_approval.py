@@ -1,9 +1,12 @@
+# Purpose: Unit tests for approval.
+
 from __future__ import annotations
 
 from closed_claw.policy.approval import ApprovalGate, ApprovalRequest
 
 
 def test_approval_accept(monkeypatch):
+    """Test approval accept."""
     gate = ApprovalGate(timeout_sec=1)
     monkeypatch.setattr(gate, "_read", lambda _: "yes")
     decision = gate.prompt(
@@ -20,6 +23,7 @@ def test_approval_accept(monkeypatch):
 
 
 def test_approval_deny(monkeypatch):
+    """Test approval deny."""
     gate = ApprovalGate(timeout_sec=1)
     monkeypatch.setattr(gate, "_read", lambda _: "no")
     decision = gate.prompt(
@@ -36,6 +40,7 @@ def test_approval_deny(monkeypatch):
 
 
 def test_approval_mode_auto_approve():
+    """Test approval mode auto approve."""
     gate = ApprovalGate(timeout_sec=1)
     decision = gate.decide_with_mode(
         ApprovalRequest(

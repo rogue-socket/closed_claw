@@ -1,3 +1,5 @@
+# Purpose: Unit tests for config env.
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +8,7 @@ from closed_claw.config import Settings
 
 
 def test_settings_reads_dotenv(monkeypatch, tmp_path: Path):
+    """Test settings reads dotenv."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
         "CLOSED_CLAW_LLM_PROVIDER=gemini\n"

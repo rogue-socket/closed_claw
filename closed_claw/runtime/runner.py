@@ -1,3 +1,5 @@
+# Purpose: Subprocess runtime for launching and managing agent execution.
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +29,7 @@ class AgentRuntimeError(RuntimeError):
 
 class AgentRunner:
     def __init__(self, timeout_sec: int = 120, retries: int = 2) -> None:
+        """Initialize the instance."""
         self.timeout_sec = timeout_sec
         self.retries = retries
 
@@ -38,6 +41,7 @@ class AgentRunner:
         approval_callback: ApprovalCallback,
         tool_callback: ToolCallback,
     ) -> AgentResponse:
+        """Asynchronously run run agent."""
         last_error: Exception | None = None
         for _ in range(self.retries + 1):
             try:
@@ -57,6 +61,7 @@ class AgentRunner:
         approval_callback: ApprovalCallback,
         tool_callback: ToolCallback,
     ) -> AgentResponse:
+        """Asynchronously run run once."""
         start = time.time()
         proc = await asyncio.create_subprocess_exec(
             sys.executable,

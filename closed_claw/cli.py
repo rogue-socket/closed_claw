@@ -1,3 +1,5 @@
+# Purpose: CLI entrypoints for running and administering Closed Claw.
+
 from __future__ import annotations
 
 import argparse
@@ -20,10 +22,12 @@ from closed_claw.tools.executor import SUPPORTED_TOOLS
 
 
 def _schema_path(settings: Settings) -> Path:
+    """Run schema path."""
     return Path(__file__).resolve().parent / "registry" / "schema.sql"
 
 
 def _registry(settings: Settings, require_sqlite_vec: bool | None = None) -> RegistryStore:
+    """Run registry."""
     return RegistryStore(
         db_path=settings.db_path,
         schema_path=_schema_path(settings),
@@ -33,6 +37,7 @@ def _registry(settings: Settings, require_sqlite_vec: bool | None = None) -> Reg
 
 
 def _load_context(context_json: str | None) -> dict[str, Any]:
+    """Run load context."""
     if not context_json:
         return {}
     value = context_json.strip()
@@ -46,11 +51,13 @@ def _load_context(context_json: str | None) -> dict[str, Any]:
 
 
 def cmd_setup(_: argparse.Namespace) -> int:
+    """Run cmd setup."""
     run_setup_wizard(Path(".env"))
     return 0
 
 
 def cmd_init(_: argparse.Namespace) -> int:
+    """Run cmd init."""
     settings = Settings.from_env()
     settings.ensure_dirs()
     _migrate_legacy_agents(settings)
@@ -60,6 +67,7 @@ def cmd_init(_: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    """Run cmd run."""
     settings = Settings.from_env()
     if getattr(args, "llm_provider", None) or getattr(args, "llm_model", None):
         settings = replace(
@@ -94,11 +102,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
 
     async def _run() -> dict[str, Any]:
+        """Asynchronously run run."""
         run_log = settings.run_logs_dir / f"{run_id}.jsonl"
         stop_event = asyncio.Event()
         last_snapshot = ""
 
         async def monitor() -> None:
+            """Asynchronously run monitor."""
             nonlocal last_snapshot
             seen = 0
             while not stop_event.is_set():
@@ -128,7 +138,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                         if snapshot == last_snapshot:
                             continue
                         last_snapshot = snapshot
-                        print("\nTask Pool (auto-update):")
+                        phase = (event.get("payload") or {}).get("phase")
+                        phase_label = f"{phase}, " if isinstance(phase, str) and phase else ""
+                        print(f"\nTask Pool ({phase_label}auto-update):")
                         for t in tasks:
                             deps = ",".join(t.get("depends_on", []) or [])
                             agent = t.get("assigned_agent_id") or "-"
@@ -223,6 +235,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "created_agents": created_agents,
                 "role_agent_map": result.get("role_agent_map", {}),
                 "subtask_pool": result.get("subtask_pool", []),
+                "discovery_subtask_pool": result.get("discovery_subtask_pool", []),
+                "execution_subtask_pool": result.get("execution_subtask_pool", []),
+                "discovery_results": result.get("discovery_results", {}),
+                "execution_results": result.get("execution_results", {}),
                 "artifacts": result.get("artifacts", []),
                 "approvals": result.get("approvals", []),
                 "tool_events": result.get("tool_events", []),
@@ -235,6 +251,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_agents(args: argparse.Namespace) -> int:
+    """Run cmd agents."""
     settings = Settings.from_env()
     base = _registry(settings, require_sqlite_vec=False).list_agents(limit=args.limit)
     data: list[dict[str, Any]] = []
@@ -261,6 +278,7 @@ def cmd_agents(args: argparse.Namespace) -> int:
 
 
 def cmd_agent(args: argparse.Namespace) -> int:
+    """Run cmd agent."""
     settings = Settings.from_env()
     agent_id = args.agent_id.strip()
     if not agent_id:
@@ -297,6 +315,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
+    """Run cmd runs."""
     settings = Settings.from_env()
     data = _registry(settings, require_sqlite_vec=False).list_runs(limit=args.limit)
     print(json.dumps(data, indent=2))
@@ -304,6 +323,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
+    """Run cmd audit."""
     settings = Settings.from_env()
     data = AuditStore(settings.db_path).list_events(limit=args.limit)
     print(json.dumps(data, indent=2))
@@ -311,6 +331,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def cmd_runlog(args: argparse.Namespace) -> int:
+    """Run cmd runlog."""
     settings = Settings.from_env()
     path = settings.run_logs_dir / f"{args.run_id}.jsonl"
     if not path.exists():
@@ -322,6 +343,7 @@ def cmd_runlog(args: argparse.Namespace) -> int:
 
 
 def cmd_cancel_run(args: argparse.Namespace) -> int:
+    """Run cmd cancel run."""
     settings = Settings.from_env()
     run_id = args.run_id.strip()
     if not run_id:
@@ -343,6 +365,7 @@ def cmd_cancel_run(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
+    """Run cmd doctor."""
     settings = Settings.from_env()
     key_name = {
         "openai": "OPENAI_API_KEY",
@@ -388,6 +411,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
+    """Run cmd tools."""
     settings = Settings.from_env()
     payload: dict[str, Any] = {"supported_tools": SUPPORTED_TOOLS}
     if args.agent_id:
@@ -406,6 +430,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 
 def _sync_registry_index(settings: Settings) -> None:
+    """Run sync registry index."""
     manifests: list[AgentManifest] = []
     for path in settings.agents_dir.glob("*/manifest.json"):
         try:
@@ -417,6 +442,7 @@ def _sync_registry_index(settings: Settings) -> None:
 
 
 def _migrate_legacy_agents(settings: Settings) -> None:
+    """Run migrate legacy agents."""
     reg = _registry(settings, require_sqlite_vec=False)
     changed = False
     for manifest_path in settings.agents_dir.glob("*/manifest.json"):
@@ -435,7 +461,7 @@ def _migrate_legacy_agents(settings: Settings) -> None:
 
         if entrypoint_path.exists():
             current = entrypoint_path.read_text(encoding="utf-8")
-            if "organize_by_type" in current or "CLOSED_CLAW_ENTRYPOINT_VERSION=6" not in current:
+            if "organize_by_type" in current or "CLOSED_CLAW_ENTRYPOINT_VERSION=9" not in current:
                 entrypoint_path.write_text(ENTRYPOINT_TEMPLATE, encoding="utf-8")
                 local_changed = True
 
@@ -449,6 +475,7 @@ def _migrate_legacy_agents(settings: Settings) -> None:
 
 
 def cmd_delete_agent(args: argparse.Namespace) -> int:
+    """Run cmd delete agent."""
     settings = Settings.from_env()
     agent_id = args.agent_id.strip()
     if not agent_id:
@@ -475,6 +502,7 @@ def cmd_delete_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_delete_all_agents(args: argparse.Namespace) -> int:
+    """Run cmd delete all agents."""
     settings = Settings.from_env()
     if not args.yes:
         raw = input("Type 'DELETE ALL' to delete every agent: ").strip()
@@ -512,6 +540,7 @@ def cmd_delete_all_agents(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Run build parser."""
     parser = argparse.ArgumentParser(prog="closed_claw", description="Closed Claw coordinator CLI")
     sub = parser.add_subparsers(dest="command", required=False)
 
@@ -583,6 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Run main."""
     parser = build_parser()
     args = parser.parse_args()
 

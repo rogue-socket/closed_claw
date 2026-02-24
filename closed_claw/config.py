@@ -1,3 +1,5 @@
+# Purpose: Environment-backed runtime settings loading and validation.
+
 from __future__ import annotations
 
 import os
@@ -6,6 +8,7 @@ from pathlib import Path
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:
+    """Run load dotenv."""
     if not path.exists():
         return {}
     out: dict[str, str] = {}
@@ -19,6 +22,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 
 def _getenv(name: str, default: str, dotenv: dict[str, str]) -> str:
+    """Run getenv."""
     if name in os.environ:
         return os.environ[name]
     return dotenv.get(name, default)
@@ -54,12 +58,14 @@ class Settings:
     gemini_base_url: str
     anthropic_base_url: str
     extra_allowed_paths: list[Path]
+    subtask_max_attempts: int = 2
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """Run from env."""
         cwd = Path.cwd()
         dotenv = _load_dotenv(cwd / ".env")
-        paid = _getenv("CLOSED_CLAW_PAID_API_PROVIDERS", "demo-llm", dotenv)
+        paid = _getenv("CLOSED_CLAW_PAID_API_PROVIDERS", "", dotenv)
         provider = _getenv("CLOSED_CLAW_LLM_PROVIDER", "heuristic", dotenv).lower()
         extra_paths_raw = _getenv("CLOSED_CLAW_EXTRA_ALLOWED_PATHS", "", dotenv)
         default_model = {
@@ -100,6 +106,10 @@ class Settings:
             task_pool_poll_interval_sec=int(
                 _getenv("CLOSED_CLAW_TASK_POOL_POLL_INTERVAL_SEC", "30", dotenv)
             ),
+            subtask_max_attempts=max(
+                1,
+                int(_getenv("CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS", "2", dotenv)),
+            ),
             require_sqlite_vec=_getenv("CLOSED_CLAW_REQUIRE_SQLITE_VEC", "true", dotenv).lower()
             in {"1", "true", "yes"},
             llm_provider=provider,
@@ -122,6 +132,7 @@ class Settings:
         )
 
     def ensure_dirs(self) -> None:
+        """Run ensure dirs."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.agents_dir.mkdir(parents=True, exist_ok=True)
         self.run_logs_dir.mkdir(parents=True, exist_ok=True)

@@ -1,3 +1,5 @@
+# Purpose: Tool execution sandbox and built-in tool implementations.
+
 from __future__ import annotations
 
 import json
@@ -34,11 +36,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "args_schema": {"url": "string", "timeout_s": "float(optional)"},
     },
     "file_io": {
-        "description": "Read, write, or append text files inside allowed roots.",
+        "description": "List directories and read/write/append text files inside allowed roots.",
         "args_schema": {
-            "op": "string(read|write|append)",
+            "op": "string(list|read|write|append)",
             "path": "string",
             "content": "string(optional for write/append)",
+            "recursive": "bool(optional for list)",
+            "max_entries": "int(optional for list)",
         },
     },
     "python_exec": {
@@ -57,6 +61,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
 
 
 def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
+    """Run tool registry for allowlist."""
     return [
         {"name": name, **TOOL_REGISTRY[name]}
         for name in allowlist
@@ -66,12 +71,14 @@ def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
 
 class ToolExecutor:
     def __init__(self, workspace_root: Path, allowed_roots: list[Path] | None = None) -> None:
+        """Initialize the instance."""
         self.workspace_root = workspace_root.resolve()
         self.allowed_roots = [self.workspace_root]
         if allowed_roots:
             self.allowed_roots.extend(p.resolve() for p in allowed_roots)
 
     def execute(self, tool: str, args: dict[str, Any], allowlist: list[str]) -> dict[str, Any]:
+        """Run execute."""
         if tool not in allowlist:
             raise ToolExecutionError(f"tool '{tool}' is not allowed for this agent")
 
@@ -90,6 +97,7 @@ class ToolExecutor:
         raise ToolExecutionError(f"unknown tool: {tool}")
 
     def _terminal(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run terminal."""
         cmd = str(args.get("cmd", "")).strip()
         if not cmd:
             raise ToolExecutionError("terminal requires non-empty 'cmd'")
@@ -109,6 +117,7 @@ class ToolExecutor:
         }
 
     def _http_api(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run http api."""
         import httpx
 
         method = str(args.get("method", "GET")).upper()
@@ -128,6 +137,7 @@ class ToolExecutor:
         }
 
     def _web_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run web fetch."""
         import httpx
 
         url = str(args.get("url", "")).strip()
@@ -138,6 +148,7 @@ class ToolExecutor:
         return {"status_code": resp.status_code, "text": resp.text[:10000]}
 
     def _safe_path(self, path_str: str) -> Path:
+        """Run safe path."""
         path = Path(path_str).expanduser()
         if not path.is_absolute():
             path = (self.workspace_root / path).resolve()
@@ -148,8 +159,37 @@ class ToolExecutor:
         return path
 
     def _file_io(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run file io."""
         op = str(args.get("op", "read"))
         path = self._safe_path(str(args.get("path", "")))
+        if op == "list":
+            if not path.exists():
+                raise ToolExecutionError(f"path not found: {path}")
+            if not path.is_dir():
+                raise ToolExecutionError("file_io list requires a directory path")
+            recursive = bool(args.get("recursive", False))
+            max_entries = int(args.get("max_entries", 200))
+            max_entries = max(1, min(max_entries, 2000))
+
+            entries: list[dict[str, Any]] = []
+            iterator = path.rglob("*") if recursive else path.iterdir()
+            for child in sorted(iterator, key=lambda p: str(p).lower()):
+                kind = "dir" if child.is_dir() else "file"
+                item: dict[str, Any] = {"path": str(child), "name": child.name, "kind": kind}
+                if child.is_file():
+                    try:
+                        item["size_bytes"] = child.stat().st_size
+                    except Exception:
+                        item["size_bytes"] = None
+                entries.append(item)
+                if len(entries) >= max_entries:
+                    break
+            return {
+                "path": str(path),
+                "recursive": recursive,
+                "truncated": len(entries) >= max_entries,
+                "entries": entries,
+            }
         if op == "read":
             return {"content": path.read_text(encoding="utf-8")}
         if op == "write":
@@ -163,9 +203,10 @@ class ToolExecutor:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(content)
             return {"appended": True, "path": str(path)}
-        raise ToolExecutionError("file_io op must be read|write|append")
+        raise ToolExecutionError("file_io op must be list|read|write|append")
 
     def _python_exec(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run python exec."""
         code = str(args.get("code", "")).strip()
         if not code:
             raise ToolExecutionError("python_exec requires 'code'")
@@ -184,6 +225,7 @@ class ToolExecutor:
         }
 
     def _sql_query(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run sql query."""
         import sqlite3
 
         db_path = self._safe_path(str(args.get("db_path", "")))

@@ -1,3 +1,5 @@
+# Purpose: Unit tests for reranker config.
+
 from __future__ import annotations
 
 from closed_claw.config import Settings
@@ -5,6 +7,7 @@ from closed_claw.registry.search import HeuristicReranker, LLMReranker, build_re
 
 
 def _settings(provider: str, generic_key: str = "", openai_key: str = "", gemini_key: str = "", anthropic_key: str = "") -> Settings:
+    """Test settings."""
     return Settings(
         db_path=__import__("pathlib").Path(".closed_claw/registry.db"),
         agents_dir=__import__("pathlib").Path("agents"),
@@ -38,25 +41,30 @@ def _settings(provider: str, generic_key: str = "", openai_key: str = "", gemini
 
 
 def test_default_heuristic():
+    """Test default heuristic."""
     rr = build_reranker(_settings("heuristic"))
     assert isinstance(rr, HeuristicReranker)
 
 
 def test_openai_without_key_falls_back():
+    """Test openai without key falls back."""
     rr = build_reranker(_settings("openai"))
     assert isinstance(rr, HeuristicReranker)
 
 
 def test_openai_with_key_uses_llm():
+    """Test openai with key uses llm."""
     rr = build_reranker(_settings("openai", openai_key="k"))
     assert isinstance(rr, LLMReranker)
 
 
 def test_gemini_with_generic_key_uses_llm():
+    """Test gemini with generic key uses llm."""
     rr = build_reranker(_settings("gemini", generic_key="k"))
     assert isinstance(rr, LLMReranker)
 
 
 def test_claude_with_key_uses_llm():
+    """Test claude with key uses llm."""
     rr = build_reranker(_settings("claude", anthropic_key="k"))
     assert isinstance(rr, LLMReranker)

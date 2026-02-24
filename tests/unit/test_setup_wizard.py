@@ -1,3 +1,5 @@
+# Purpose: Unit tests for setup wizard.
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +8,7 @@ from closed_claw.setup_wizard import upsert_env, verify_provider
 
 
 def test_upsert_env(tmp_path: Path):
+    """Test upsert env."""
     env = tmp_path / ".env"
     env.write_text("A=1\nB=2\n", encoding="utf-8")
     upsert_env(env, {"B": "22", "C": "3"})
@@ -16,6 +19,7 @@ def test_upsert_env(tmp_path: Path):
 
 
 def test_verify_heuristic():
+    """Test verify heuristic."""
     ok, msg = verify_provider("heuristic", "local-heuristic", "")
     assert ok is True
     assert "requires no API key" in msg

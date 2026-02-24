@@ -1,3 +1,5 @@
+# Purpose: SQLite-backed agent/run registry storage and querying operations.
+
 from __future__ import annotations
 
 import json
@@ -48,6 +50,7 @@ class RegistryStore:
         embedding_dim: int = 384,
         require_sqlite_vec: bool = True,
     ) -> None:
+        """Initialize the instance."""
         self.db_path = db_path
         self.schema_path = schema_path
         self.embedding_dim = embedding_dim
@@ -57,6 +60,7 @@ class RegistryStore:
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
+        """Run conn."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -70,6 +74,7 @@ class RegistryStore:
         return conn
 
     def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
+        """Run try load sqlite vec."""
         if not hasattr(conn, "enable_load_extension"):
             return False
         conn.enable_load_extension(True)
@@ -94,6 +99,7 @@ class RegistryStore:
         return True
 
     def _init_db(self) -> None:
+        """Run init db."""
         schema = self.schema_path.read_text(encoding="utf-8")
         schema = schema.replace("float[384]", f"float[{self.embedding_dim}]")
         if not self.require_sqlite_vec:
@@ -108,12 +114,14 @@ class RegistryStore:
 
     @staticmethod
     def _has_agent_vectors_table(conn: sqlite3.Connection) -> bool:
+        """Run has agent vectors table."""
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_vectors'"
         ).fetchone()
         return row is not None
 
     def upsert_manifest(self, manifest: AgentManifest) -> None:
+        """Run upsert manifest."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -173,6 +181,7 @@ class RegistryStore:
                 )
 
     def get_manifest(self, agent_id: str) -> AgentManifest | None:
+        """Run get manifest."""
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
             if row is None:
@@ -199,6 +208,7 @@ class RegistryStore:
             )
 
     def semantic_search(self, query_vector: list[float], k: int = 5) -> list[SearchCandidate]:
+        """Run semantic search."""
         with self._conn() as conn:
             if self.sqlite_vec_available and self._has_agent_vectors_table(conn):
                 vector = json.dumps(query_vector)
@@ -249,6 +259,7 @@ class RegistryStore:
         latency_ms: float | None,
         error_message: str | None = None,
     ) -> None:
+        """Run record run."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -291,6 +302,7 @@ class RegistryStore:
             )
 
     def open_circuit_if_needed(self, provider: str, threshold: int) -> bool:
+        """Run open circuit if needed."""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT failure_count FROM provider_circuit_breakers WHERE provider = ?",
@@ -311,6 +323,7 @@ class RegistryStore:
             return opened
 
     def is_circuit_open(self, provider: str, reset_after_sec: int) -> bool:
+        """Run is circuit open."""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT opened_at FROM provider_circuit_breakers WHERE provider = ?",
@@ -326,6 +339,7 @@ class RegistryStore:
             return True
 
     def reset_circuit(self, provider: str) -> None:
+        """Run reset circuit."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -337,6 +351,7 @@ class RegistryStore:
             )
 
     def list_agents(self, limit: int = 100) -> list[dict[str, object]]:
+        """Run list agents."""
         with self._conn() as conn:
             rows = conn.execute(
                 """
@@ -350,6 +365,7 @@ class RegistryStore:
             return [dict(r) for r in rows]
 
     def list_runs(self, limit: int = 100) -> list[dict[str, object]]:
+        """Run list runs."""
         with self._conn() as conn:
             rows = conn.execute(
                 """
@@ -363,6 +379,7 @@ class RegistryStore:
             return [dict(r) for r in rows]
 
     def delete_agent(self, agent_id: str) -> bool:
+        """Run delete agent."""
         with self._conn() as conn:
             exists = conn.execute(
                 "SELECT 1 FROM agents WHERE agent_id = ?",
@@ -381,6 +398,7 @@ class RegistryStore:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Run cosine similarity."""
     if not a or not b:
         return 0.0
     n = min(len(a), len(b))

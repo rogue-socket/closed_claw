@@ -1,3 +1,5 @@
+# Purpose: Interactive setup wizard for provider, model, and API key configuration.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ class SetupResult:
 
 
 def run_setup_wizard(env_path: Path | None = None) -> SetupResult:
+    """Run run setup wizard."""
     env_path = env_path or Path(".env")
     provider = _choose_provider()
     model = _choose_model(provider)
@@ -46,6 +49,7 @@ def run_setup_wizard(env_path: Path | None = None) -> SetupResult:
 
 
 def verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]:
+    """Run verify provider."""
     provider = provider.lower()
     if provider == "heuristic":
         return True, "heuristic reranker requires no API key"
@@ -65,6 +69,7 @@ def verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]
 
 
 def _verify_openai(model: str, api_key: str) -> tuple[bool, str]:
+    """Run verify openai."""
     import httpx
 
     with httpx.Client(timeout=20) as client:
@@ -87,6 +92,7 @@ def _verify_openai(model: str, api_key: str) -> tuple[bool, str]:
 
 
 def _verify_gemini(model: str, api_key: str) -> tuple[bool, str]:
+    """Run verify gemini."""
     import httpx
 
     with httpx.Client(timeout=20) as client:
@@ -104,6 +110,7 @@ def _verify_gemini(model: str, api_key: str) -> tuple[bool, str]:
 
 
 def _verify_claude(model: str, api_key: str) -> tuple[bool, str]:
+    """Run verify claude."""
     import httpx
 
     with httpx.Client(timeout=20) as client:
@@ -127,6 +134,7 @@ def _verify_claude(model: str, api_key: str) -> tuple[bool, str]:
 
 
 def _choose_provider() -> str:
+    """Run choose provider."""
     options = ["heuristic", "openai", "gemini", "claude"]
     print("Choose LLM provider:")
     for idx, item in enumerate(options, start=1):
@@ -139,6 +147,7 @@ def _choose_provider() -> str:
 
 
 def _choose_model(provider: str) -> str:
+    """Run choose model."""
     default_models = {
         "heuristic": "local-heuristic",
         "openai": "gpt-4o-mini",
@@ -151,6 +160,7 @@ def _choose_model(provider: str) -> str:
 
 
 def upsert_env(path: Path, updates: dict[str, str]) -> None:
+    """Run upsert env."""
     existing_lines: list[str] = []
     if path.exists():
         existing_lines = path.read_text(encoding="utf-8").splitlines()

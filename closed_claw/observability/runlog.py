@@ -1,3 +1,5 @@
+# Purpose: Run log event writer for per-run observability traces.
+
 from __future__ import annotations
 
 import json
@@ -8,11 +10,13 @@ from typing import Any
 
 class RunLogger:
     def __init__(self, base_dir: Path, run_id: str) -> None:
+        """Initialize the instance."""
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.base_dir / f"{run_id}.jsonl"
 
     def emit(self, event: str, payload: dict[str, Any]) -> None:
+        """Run emit."""
         line = {
             "ts": datetime.now(UTC).isoformat(),
             "event": event,

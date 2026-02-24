@@ -1,3 +1,5 @@
+# Purpose: Interactive terminal menu flows for task execution and setup.
+
 from __future__ import annotations
 
 import json
@@ -5,6 +7,7 @@ from argparse import Namespace
 
 
 def run_main_menu(handlers: dict[str, callable]) -> int:
+    """Run run main menu."""
     _print_launch_art()
     while True:
         print("\nClosed Claw")
@@ -74,6 +77,7 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
 
 
 def _run_task_interactive(handlers: dict[str, callable]) -> None:
+    """Run run task interactive."""
     raw_task = _safe_input("Task: ")
     if raw_task is None:
         print("No interactive input available.")
@@ -117,6 +121,7 @@ def _run_task_interactive(handlers: dict[str, callable]) -> None:
 
 
 def _delete_agent_interactive(handlers: dict[str, callable]) -> None:
+    """Run delete agent interactive."""
     raw = _safe_input("Agent ID to delete: ")
     if raw is None:
         print("No interactive input available.")
@@ -133,6 +138,7 @@ def _delete_agent_interactive(handlers: dict[str, callable]) -> None:
 
 
 def _delete_all_agents_interactive(handlers: dict[str, callable]) -> None:
+    """Run delete all agents interactive."""
     confirm = _safe_input("Type 'DELETE ALL' to permanently remove all agents: ")
     if (confirm or "").strip() != "DELETE ALL":
         print("Cancelled.")
@@ -141,6 +147,7 @@ def _delete_all_agents_interactive(handlers: dict[str, callable]) -> None:
 
 
 def _cancel_run_interactive(handlers: dict[str, callable]) -> None:
+    """Run cancel run interactive."""
     raw = _safe_input("Run ID to gracefully stop: ")
     run_id = (raw or "").strip()
     if not run_id:
@@ -150,12 +157,14 @@ def _cancel_run_interactive(handlers: dict[str, callable]) -> None:
 
 
 def _tools_interactive(handlers: dict[str, callable]) -> None:
+    """Run tools interactive."""
     raw = _safe_input("Agent ID [blank for global tools]: ")
     agent_id = (raw or "").strip() or None
     handlers["tools"](Namespace(agent_id=agent_id))
 
 
 def _agent_details_interactive(handlers: dict[str, callable]) -> None:
+    """Run agent details interactive."""
     raw = _safe_input("Agent ID: ")
     agent_id = (raw or "").strip()
     if not agent_id:
@@ -165,6 +174,7 @@ def _agent_details_interactive(handlers: dict[str, callable]) -> None:
 
 
 def _choose_mode(label: str, default: str) -> str:
+    """Run choose mode."""
     options = ["interactive", "approve", "deny"]
     print(f"{label}:")
     for i, mode in enumerate(options, start=1):
@@ -184,6 +194,7 @@ def _choose_mode(label: str, default: str) -> str:
 
 
 def _choose_provider(default: str) -> str:
+    """Run choose provider."""
     options = ["heuristic", "openai", "gemini", "claude"]
     print("LLM provider:")
     for i, provider in enumerate(options, start=1):
@@ -203,6 +214,7 @@ def _choose_provider(default: str) -> str:
 
 
 def _int_input(prompt: str, default: int) -> int:
+    """Run int input."""
     raw_in = _safe_input(prompt)
     if raw_in is None:
         return default
@@ -216,6 +228,7 @@ def _int_input(prompt: str, default: int) -> int:
 
 
 def _safe_input(prompt: str) -> str | None:
+    """Run safe input."""
     try:
         return input(prompt)
     except EOFError:
@@ -223,6 +236,7 @@ def _safe_input(prompt: str) -> str | None:
 
 
 def _print_launch_art() -> None:
+    """Run print launch art."""
     print(
         r"""
    ______ _                    _   _____ _

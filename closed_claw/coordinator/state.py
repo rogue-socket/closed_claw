@@ -1,3 +1,5 @@
+# Purpose: Shared coordinator state shapes and helpers.
+
 from __future__ import annotations
 
 from typing import Any, TypedDict
@@ -29,5 +31,9 @@ class CoordinatorState(TypedDict, total=False):
     memory_updates: list[dict[str, Any]]
     failed_agents: list[str]
     subtask_pool: list[dict[str, Any]]
+    discovery_subtask_pool: list[dict[str, Any]]
+    execution_subtask_pool: list[dict[str, Any]]
     role_agent_map: dict[str, str]
+    discovery_results: dict[str, str]
+    execution_results: dict[str, str]
     subtask_results: dict[str, str]

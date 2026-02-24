@@ -1,3 +1,5 @@
+# Purpose: Audit event persistence and retrieval helpers.
+
 from __future__ import annotations
 
 import json
@@ -10,16 +12,19 @@ from closed_claw.policy.approval import ApprovalDecision, ApprovalRequest
 
 class AuditStore:
     def __init__(self, db_path: Path) -> None:
+        """Initialize the instance."""
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_tables()
 
     def _conn(self) -> sqlite3.Connection:
+        """Run conn."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_tables(self) -> None:
+        """Run init tables."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -41,6 +46,7 @@ class AuditStore:
         run_id: str | None = None,
         agent_id: str | None = None,
     ) -> None:
+        """Run record event."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -57,6 +63,7 @@ class AuditStore:
         run_id: str,
         agent_id: str,
     ) -> None:
+        """Run record approval."""
         self.record_event(
             event_type="approval_decision",
             payload={"request": req.model_dump(), "decision": decision.model_dump()},
@@ -65,6 +72,7 @@ class AuditStore:
         )
 
     def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Run list events."""
         with self._conn() as conn:
             rows = conn.execute(
                 """

@@ -1,3 +1,5 @@
+# Purpose: Unit tests for registry audit.
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -8,6 +10,7 @@ from closed_claw.registry.store import AgentManifest, RegistryStore
 
 
 def test_registry_and_audit(tmp_path: Path):
+    """Test registry and audit."""
     db_path = tmp_path / "reg.db"
     schema_path = Path("closed_claw/registry/schema.sql")
     store = RegistryStore(db_path=db_path, schema_path=schema_path, embedding_dim=4, require_sqlite_vec=False)
@@ -35,6 +38,7 @@ def test_registry_and_audit(tmp_path: Path):
 
 
 def test_circuit_breaker(tmp_path: Path):
+    """Test circuit breaker."""
     db_path = tmp_path / "reg.db"
     schema_path = Path("closed_claw/registry/schema.sql")
     store = RegistryStore(db_path=db_path, schema_path=schema_path, embedding_dim=4, require_sqlite_vec=False)
@@ -47,6 +51,7 @@ def test_circuit_breaker(tmp_path: Path):
 
 
 def test_delete_agent(tmp_path: Path):
+    """Test delete agent."""
     db_path = tmp_path / "reg.db"
     schema_path = Path("closed_claw/registry/schema.sql")
     store = RegistryStore(db_path=db_path, schema_path=schema_path, embedding_dim=4, require_sqlite_vec=False)
@@ -70,6 +75,7 @@ def test_delete_agent(tmp_path: Path):
 
 
 def test_registry_init_without_sqlite_vec_outside_pytest_env(monkeypatch, tmp_path: Path):
+    """Test registry init without sqlite vec outside pytest env."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     db_path = tmp_path / "reg.db"
     schema_path = Path(__file__).resolve().parents[2] / "closed_claw/registry/schema.sql"

@@ -1,3 +1,5 @@
+# Purpose: Unit tests for delete all agents.
+
 from __future__ import annotations
 
 import shutil
@@ -11,6 +13,7 @@ from closed_claw.registry.store import RegistryStore
 
 
 def test_delete_all_agents(monkeypatch, tmp_path: Path):
+    """Test delete all agents."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CLOSED_CLAW_DB_PATH", str(tmp_path / ".closed_claw/registry.db"))
     monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", "agents")
@@ -62,6 +65,7 @@ def test_delete_all_agents(monkeypatch, tmp_path: Path):
 
 
 def test_delete_all_agents_when_agents_dir_missing(monkeypatch, tmp_path: Path):
+    """Test delete all agents when agents dir missing."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CLOSED_CLAW_DB_PATH", str(tmp_path / ".closed_claw/registry.db"))
     monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", "agents")

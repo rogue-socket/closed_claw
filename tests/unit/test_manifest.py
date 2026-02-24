@@ -1,3 +1,5 @@
+# Purpose: Unit tests for manifest.
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -6,6 +8,7 @@ from closed_claw.registry.store import AgentManifest
 
 
 def test_manifest_supports_new_fields():
+    """Test manifest supports new fields."""
     manifest = AgentManifest(
         agent_id="a1",
         name="Agent A",

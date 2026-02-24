@@ -1,3 +1,5 @@
+# Purpose: Human approval gate logic for create/reuse and paid API decisions.
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -10,6 +12,7 @@ try:
 except Exception:
     class Console:  # type: ignore[override]
         def print(self, text: str) -> None:
+            """Run print."""
             print(text)
 
 
@@ -31,13 +34,16 @@ class ApprovalDecision(BaseModel):
 
 class ApprovalGate:
     def __init__(self, timeout_sec: int = 30, console: Console | None = None) -> None:
+        """Initialize the instance."""
         self.timeout_sec = timeout_sec
         self.console = console or Console()
 
     def _read(self, prompt: str) -> str:
+        """Run read."""
         return input(prompt)
 
     def prompt(self, req: ApprovalRequest, operator: str = "human") -> ApprovalDecision:
+        """Run prompt."""
         self.console.print("\n[bold yellow]Approval required for external paid API call[/bold yellow]")
         self.console.print(f"session: {req.session_id}")
         self.console.print(f"provider: {req.provider}")
@@ -74,6 +80,7 @@ class ApprovalGate:
         mode: str = "interactive",
         operator: str = "human",
     ) -> ApprovalDecision:
+        """Run decide with mode."""
         normalized = mode.lower()
         if normalized == "approve":
             return ApprovalDecision(
@@ -98,6 +105,7 @@ class ApprovalGate:
         run_id: str,
         top_candidate: dict[str, str | float] | None = None,
     ) -> ApprovalDecision:
+        """Run decide create with mode."""
         normalized = mode.lower()
         if normalized == "approve":
             return ApprovalDecision(

@@ -1,0 +1,5 @@
+- Add proper structure to the coordinator node functioning, force goal, acceptance criteria
+- Give the supervisor node, way to create subagents and subflows
+- Deploy on laptop and get agents to work
+- Extend functionality to use external agents and other APIs
+- Extend functionality with launching servers

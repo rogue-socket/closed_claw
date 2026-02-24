@@ -79,8 +79,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         }
 
     app_graph = build_graph(settings)
+    run_id = uuid.uuid4().hex
+    print(f"Run started: {run_id}")
+    print(f"To gracefully stop this run loop: python -m closed_claw.cli cancel-run {run_id}")
     initial_state = {
-        "run_id": uuid.uuid4().hex,
+        "run_id": run_id,
         "session_id": args.session_id or uuid.uuid4().hex[:12],
         "task": args.task,
         "context": context_obj,
@@ -91,30 +94,120 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
 
     async def _run() -> dict[str, Any]:
-        return await app_graph.ainvoke(initial_state)
+        run_log = settings.run_logs_dir / f"{run_id}.jsonl"
+        stop_event = asyncio.Event()
+        last_snapshot = ""
 
+        async def monitor() -> None:
+            nonlocal last_snapshot
+            seen = 0
+            while not stop_event.is_set():
+                if run_log.exists():
+                    lines = run_log.read_text(encoding="utf-8").splitlines()
+                    new_lines = lines[seen:]
+                    seen = len(lines)
+                    for line in new_lines:
+                        try:
+                            event = json.loads(line)
+                        except Exception:
+                            continue
+                        if event.get("event") != "task_pool_update":
+                            if event.get("event") == "tool_call":
+                                payload = event.get("payload") or {}
+                                print(
+                                    "\nTool Call:"
+                                    f" agent={payload.get('agent_id','-')}"
+                                    f" tool={payload.get('tool','-')}"
+                                    f" ok={payload.get('ok', False)}"
+                                    f" reason={payload.get('reason','')}"
+                                )
+                                continue
+                            continue
+                        tasks = (event.get("payload") or {}).get("tasks", [])
+                        snapshot = json.dumps(tasks, sort_keys=True)
+                        if snapshot == last_snapshot:
+                            continue
+                        last_snapshot = snapshot
+                        print("\nTask Pool (auto-update):")
+                        for t in tasks:
+                            deps = ",".join(t.get("depends_on", []) or [])
+                            agent = t.get("assigned_agent_id") or "-"
+                            print(
+                                f"- [{t.get('status','unknown')}] {t.get('task_id','?')} "
+                                f"tag={t.get('role_tag','-')} deps=[{deps}] agent={agent} "
+                                f"title={t.get('title','')}"
+                            )
+                await asyncio.sleep(0.2)
+
+        monitor_task = asyncio.create_task(monitor())
+        try:
+            return await app_graph.ainvoke(initial_state)
+        finally:
+            stop_event.set()
+            with contextlib.suppress(Exception):
+                await monitor_task
+
+    import contextlib
     result = asyncio.run(_run())
+    created_agents = result.get("created_agents", [])
     created_agent = result.get("created_agent")
-    if created_agent:
-        print("Coordinator update: I could not find a strong existing match, so I created a new capability agent.")
+    if created_agents:
+        print("Coordinator update: Created new capability agents for plan roles.")
+        for item in created_agents:
+            print(
+                f"- agent_id={item.get('agent_id')} role_tag={item.get('role_tag')} "
+                f"name={item.get('name')} tools={item.get('tools_allowlist', [])}"
+            )
+    elif created_agent:
+        print("Coordinator update: Created one new capability agent.")
         print(
             f"Creating agent with name='{created_agent.get('name')}', "
             f"tools={created_agent.get('tools_allowlist', [])}"
         )
         print(f"Agent created: {created_agent.get('agent_id')}")
     else:
-        print(
-            "Coordinator update: I reused an existing capability agent "
-            f"({result.get('selected_agent_id', 'unknown')})."
-        )
+        role_map = result.get("role_agent_map", {})
+        if role_map:
+            print("Coordinator update: Reused capability agents for plan roles.")
+            for role_tag, agent_id in role_map.items():
+                print(f"- role_tag={role_tag} agent_id={agent_id}")
+        else:
+            print(
+                "Coordinator update: I reused an existing capability agent "
+                f"({result.get('selected_agent_id', 'unknown')})."
+            )
 
     if result.get("approvals"):
         print(f"Coordinator update: Collected {len(result.get('approvals', []))} approval decision(s).")
     else:
         print("Coordinator update: No approval was required for this run.")
 
+    if result.get("tool_events"):
+        print(f"Coordinator update: Observed {len(result.get('tool_events', []))} tool call(s).")
+        for evt in result.get("tool_events", []):
+            print(
+                f"- tool={evt.get('tool')} ok={evt.get('ok')} "
+                f"agent={evt.get('agent_id','-')} reason={evt.get('reason','')}"
+            )
+    else:
+        print("Coordinator update: No tool call events were observed.")
+
+    pool = result.get("subtask_pool", [])
+    if pool:
+        print("\nTask Pool (final):")
+        for t in pool:
+            deps = ",".join(t.get("depends_on", []) or [])
+            agent = t.get("assigned_agent_id") or "-"
+            print(
+                f"- [{t.get('status','unknown')}] {t.get('task_id','?')} "
+                f"tag={t.get('role_tag','-')} deps=[{deps}] agent={agent} "
+                f"title={t.get('title','')}"
+            )
+
     if result.get("response_status") == "ok":
         print("Coordinator update: Task completed successfully.")
+    elif result.get("response_error") == "cancelled_by_user":
+        print("Coordinator update: Run stopped gracefully by user request.")
     else:
         print(f"Coordinator update: Task failed with status={result.get('response_status')}.")
 
@@ -127,8 +220,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "agent_id": result.get("selected_agent_id"),
                 "created_agent_description": result.get("created_agent_description"),
                 "created_agent": created_agent,
+                "created_agents": created_agents,
+                "role_agent_map": result.get("role_agent_map", {}),
+                "subtask_pool": result.get("subtask_pool", []),
                 "artifacts": result.get("artifacts", []),
                 "approvals": result.get("approvals", []),
+                "tool_events": result.get("tool_events", []),
                 "run_log": str(settings.run_logs_dir / f"{result.get('run_id')}.jsonl"),
             },
             indent=2,
@@ -221,6 +318,27 @@ def cmd_runlog(args: argparse.Namespace) -> int:
     lines = path.read_text(encoding="utf-8").splitlines()
     for line in lines[-args.tail :]:
         print(line)
+    return 0
+
+
+def cmd_cancel_run(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    run_id = args.run_id.strip()
+    if not run_id:
+        raise SystemExit("run_id is required")
+    settings.run_logs_dir.mkdir(parents=True, exist_ok=True)
+    cancel_path = settings.run_logs_dir / f"{run_id}.cancel"
+    cancel_path.write_text("cancel_requested\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "cancel_requested": True,
+                "run_id": run_id,
+                "cancel_file": str(cancel_path),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -317,7 +435,7 @@ def _migrate_legacy_agents(settings: Settings) -> None:
 
         if entrypoint_path.exists():
             current = entrypoint_path.read_text(encoding="utf-8")
-            if "organize_by_type" in current:
+            if "organize_by_type" in current or "CLOSED_CLAW_ENTRYPOINT_VERSION=6" not in current:
                 entrypoint_path.write_text(ENTRYPOINT_TEMPLATE, encoding="utf-8")
                 local_changed = True
 
@@ -378,14 +496,15 @@ def cmd_delete_all_agents(args: argparse.Namespace) -> int:
         deleted_ids.append(agent_id)
 
     # Clean stray capsule dirs not in registry
-    for capsule in settings.agents_dir.iterdir():
-        if not capsule.is_dir():
-            continue
-        if capsule.name in deleted_ids:
-            continue
-        if (capsule / "manifest.json").exists():
-            shutil.rmtree(capsule)
-            deleted_ids.append(capsule.name)
+    if settings.agents_dir.exists():
+        for capsule in settings.agents_dir.iterdir():
+            if not capsule.is_dir():
+                continue
+            if capsule.name in deleted_ids:
+                continue
+            if (capsule / "manifest.json").exists():
+                shutil.rmtree(capsule)
+                deleted_ids.append(capsule.name)
 
     _sync_registry_index(settings)
     print(json.dumps({"deleted_count": len(deleted_ids), "agent_ids": deleted_ids}, indent=2))
@@ -437,6 +556,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_runlog.add_argument("--tail", type=int, default=100)
     p_runlog.set_defaults(func=cmd_runlog)
 
+    p_cancel = sub.add_parser("cancel-run", help="Gracefully stop a running task loop")
+    p_cancel.add_argument("run_id", type=str)
+    p_cancel.set_defaults(func=cmd_cancel_run)
+
     p_doctor = sub.add_parser("doctor", help="Validate local environment and dependencies")
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -473,6 +596,7 @@ def main() -> int:
         "runs": cmd_runs,
         "audit": cmd_audit,
         "runlog": cmd_runlog,
+        "cancel_run": cmd_cancel_run,
         "tools": cmd_tools,
         "delete_agent": cmd_delete_agent,
         "delete_all_agents": cmd_delete_all_agents,

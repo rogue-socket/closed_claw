@@ -20,7 +20,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         print("10) List Tools")
         print("11) Delete Agent")
         print("12) Delete All Agents")
-        print("13) Exit")
+        print("13) Stop Run Loop (graceful)")
+        print("14) Exit")
 
         choice = _safe_input("Choose an option: ")
         if choice is None:
@@ -64,6 +65,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         elif choice == "12":
             _delete_all_agents_interactive(handlers)
         elif choice == "13":
+            _cancel_run_interactive(handlers)
+        elif choice == "14":
             print("Goodbye.")
             return 0
         else:
@@ -135,6 +138,15 @@ def _delete_all_agents_interactive(handlers: dict[str, callable]) -> None:
         print("Cancelled.")
         return
     handlers["delete_all_agents"](Namespace(yes=True))
+
+
+def _cancel_run_interactive(handlers: dict[str, callable]) -> None:
+    raw = _safe_input("Run ID to gracefully stop: ")
+    run_id = (raw or "").strip()
+    if not run_id:
+        print("Run ID is required.")
+        return
+    handlers["cancel_run"](Namespace(run_id=run_id))
 
 
 def _tools_interactive(handlers: dict[str, callable]) -> None:

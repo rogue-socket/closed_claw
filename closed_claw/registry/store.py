@@ -96,7 +96,7 @@ class RegistryStore:
     def _init_db(self) -> None:
         schema = self.schema_path.read_text(encoding="utf-8")
         schema = schema.replace("float[384]", f"float[{self.embedding_dim}]")
-        if os.getenv("PYTEST_CURRENT_TEST") is not None and not self.require_sqlite_vec:
+        if not self.require_sqlite_vec:
             schema = re.sub(
                 r"CREATE VIRTUAL TABLE IF NOT EXISTS agent_vectors USING vec0\(\s*agent_id TEXT,\s*embedding float\[\d+\]\s*\);\n?",
                 "",

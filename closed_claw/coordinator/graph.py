@@ -40,12 +40,14 @@ def build_graph(settings: Settings) -> Any:
 
     graph = StateGraph(dict)
     graph.add_node("ingest_task", nodes.ingest_task)
+    graph.add_node("decompose_task", nodes.decompose_task)
     graph.add_node("embed_task", nodes.embed_task)
     graph.add_node("semantic_search", nodes.semantic_search)
     graph.add_node("llm_rerank", nodes.llm_rerank)
     graph.add_node("human_gate_if_low_confidence", nodes.human_gate_if_low_confidence)
     graph.add_node("decide_reuse_or_create", nodes.decide_reuse_or_create)
     graph.add_node("create_agent_if_needed", nodes.create_agent_if_needed)
+    graph.add_node("execute_task_pool", nodes.execute_task_pool)
     graph.add_node("dispatch_agents_async", nodes.dispatch_agents_async)
     graph.add_node("validate_outputs", nodes.validate_outputs)
     graph.add_node("approval_gate_for_api_calls", nodes.approval_gate_for_api_calls)
@@ -55,25 +57,9 @@ def build_graph(settings: Settings) -> Any:
     graph.add_node("failure_recovery", nodes.failure_recovery)
 
     graph.set_entry_point("ingest_task")
-    graph.add_edge("ingest_task", "embed_task")
-    graph.add_edge("embed_task", "semantic_search")
-    graph.add_edge("semantic_search", "llm_rerank")
-    graph.add_edge("llm_rerank", "human_gate_if_low_confidence")
-    graph.add_edge("human_gate_if_low_confidence", "decide_reuse_or_create")
-
-    def route_create_decision(state: dict[str, Any]) -> str:
-        return "create_agent_if_needed" if state.get("decision") == "create" else "dispatch_agents_async"
-
-    graph.add_conditional_edges(
-        "decide_reuse_or_create",
-        route_create_decision,
-        {
-            "create_agent_if_needed": "create_agent_if_needed",
-            "dispatch_agents_async": "dispatch_agents_async",
-        },
-    )
-    graph.add_edge("create_agent_if_needed", "dispatch_agents_async")
-    graph.add_edge("dispatch_agents_async", "validate_outputs")
+    graph.add_edge("ingest_task", "decompose_task")
+    graph.add_edge("decompose_task", "execute_task_pool")
+    graph.add_edge("execute_task_pool", "validate_outputs")
 
     def route_failure(state: dict[str, Any]) -> str:
         return "failure_recovery" if state.get("response_status") == "error" else "approval_gate_for_api_calls"

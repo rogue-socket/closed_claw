@@ -16,19 +16,40 @@ Primary components:
 ## Coordinator Flow
 
 1. `ingest_task`
-2. `embed_task`
-3. `semantic_search`
-4. `llm_rerank` (currently heuristic reranker)
-5. `human_gate_if_low_confidence`
-6. `decide_reuse_or_create`
-7. `create_agent_if_needed`
-8. `dispatch_agents_async`
+2. `decompose_task` (LLM/heuristic plan generation into atomic subtasks)
+3. `execute_task_pool` (role-tag agent acquisition, dependency-aware execution)
 9. `validate_outputs`
 10. `approval_gate_for_api_calls` (runtime handshake handles decisions)
 11. `continue_or_deny_api_path`
 12. `update_registry_and_audit`
 13. `synthesize_final_response`
 14. `failure_recovery`
+
+## Task Pool Execution Model
+
+Current implementation:
+- The supervisor owns the task pool loop during a run.
+- Subtasks move through `waiting -> pending -> in_progress -> completed/failed`.
+- Dependencies are enforced before execution.
+- Role tags determine agent reuse/create and assignment.
+- Status updates are emitted as `task_pool_update` events to run logs and surfaced in CLI.
+
+Known limitation:
+- This is in-run orchestration, not persistent background workers.
+- Agents do not run as standalone daemons that independently poll shared task storage.
+
+TODO (target architecture):
+- Promote task pool to a durable queue/state store.
+- Run persistent background workers per capability role tag.
+- Workers poll/claim tasks every `CLOSED_CLAW_TASK_POOL_POLL_INTERVAL_SEC` (default 30s).
+- Add lease/heartbeat + retry semantics to avoid duplicate claims and stuck tasks.
+- Add CLI `runs watch` for live checklist from queue state (not only runlog tailing).
+
+Acceptance criteria for this TODO:
+- A long task continues after CLI process exits.
+- Multiple workers can execute independent subtasks concurrently.
+- Dependency-blocked tasks remain `waiting` until prerequisites complete.
+- User can reconnect and see accurate live status + final synthesized output.
 
 ## Capsule Model
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from argparse import Namespace
 from pathlib import Path
 
@@ -58,3 +59,19 @@ def test_delete_all_agents(monkeypatch, tmp_path: Path):
     assert not (settings.agents_dir / m1.agent_id).exists()
     assert not (settings.agents_dir / m2.agent_id).exists()
     assert store.list_agents(limit=10) == []
+
+
+def test_delete_all_agents_when_agents_dir_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLOSED_CLAW_DB_PATH", str(tmp_path / ".closed_claw/registry.db"))
+    monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", "agents")
+    monkeypatch.setenv("CLOSED_CLAW_REQUIRE_SQLITE_VEC", "false")
+    monkeypatch.setenv("CLOSED_CLAW_EMBEDDING_DIM", "4")
+
+    settings = Settings.from_env()
+    if settings.agents_dir.exists():
+        shutil.rmtree(settings.agents_dir)
+
+    rc = cmd_delete_all_agents(Namespace(yes=True))
+    assert rc == 0
+    assert (settings.agents_dir / "registry.json").exists()

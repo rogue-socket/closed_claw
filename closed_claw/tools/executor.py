@@ -13,6 +13,56 @@ class ToolExecutionError(RuntimeError):
 
 SUPPORTED_TOOLS = ["terminal", "http_api", "web_fetch", "file_io", "python_exec", "sql_query"]
 
+TOOL_REGISTRY: dict[str, dict[str, Any]] = {
+    "terminal": {
+        "description": "Run a shell command in the workspace.",
+        "args_schema": {"cmd": "string", "timeout_s": "int(optional)"},
+    },
+    "http_api": {
+        "description": "Make an HTTP request and return status/body snippet.",
+        "args_schema": {
+            "method": "string(optional, default=GET)",
+            "url": "string",
+            "headers": "object(optional)",
+            "json": "object(optional)",
+            "params": "object(optional)",
+            "timeout_s": "float(optional)",
+        },
+    },
+    "web_fetch": {
+        "description": "Fetch a webpage by URL and return status/body snippet.",
+        "args_schema": {"url": "string", "timeout_s": "float(optional)"},
+    },
+    "file_io": {
+        "description": "Read, write, or append text files inside allowed roots.",
+        "args_schema": {
+            "op": "string(read|write|append)",
+            "path": "string",
+            "content": "string(optional for write/append)",
+        },
+    },
+    "python_exec": {
+        "description": "Execute a short Python snippet.",
+        "args_schema": {"code": "string", "timeout_s": "int(optional)"},
+    },
+    "sql_query": {
+        "description": "Execute a SELECT query on a SQLite database file.",
+        "args_schema": {
+            "db_path": "string",
+            "query": "string(SELECT only)",
+            "params": "array(optional)",
+        },
+    },
+}
+
+
+def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"name": name, **TOOL_REGISTRY[name]}
+        for name in allowlist
+        if name in TOOL_REGISTRY
+    ]
+
 
 class ToolExecutor:
     def __init__(self, workspace_root: Path, allowed_roots: list[Path] | None = None) -> None:

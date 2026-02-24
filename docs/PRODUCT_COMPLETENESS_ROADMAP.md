@@ -178,11 +178,15 @@ The product’s intended value is: fast local orchestration with policy controls
 
 #### 8) Add background run queue mode (local async worker)
 - **Why it matters:** Enables non-blocking long tasks while preserving local-first model.
-- **What to build/change:** Queue file/db table + worker loop + `runs watch` command.
+- **What to build/change:** Promote current in-run supervisor task-pool loop to durable queue + persistent workers.
+  - Durable task pool table: `task_id`, `run_id`, `role_tag`, `status`, `depends_on`, `lease_owner`, `lease_expires_at`, `attempt`.
+  - Worker process model: role-tag workers poll every `CLOSED_CLAW_TASK_POOL_POLL_INTERVAL_SEC` (default 30s), claim by lease, execute, heartbeat, complete/fail.
+  - Scheduler process: dependency resolver transitions `waiting -> pending` when deps complete.
+  - CLI: `runs watch <run_id>` renders live checklist from queue state.
 - **Where it fits:** new `closed_claw/runtime/queue.py`, CLI additions.
 - **Effort:** L
 - **Risks/trade-offs:** Must avoid race/duplication.
-- **Success metric:** Long-run completion without interactive blocking.
+- **Success metric:** Long-run completion without interactive blocking; run survives CLI exit/restart.
 
 ### Theme 4: UX consistency & ergonomics
 

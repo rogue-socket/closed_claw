@@ -223,6 +223,13 @@ Show JSONL events for one run.
 python -m closed_claw.cli runlog <run_id> --tail 200
 ```
 
+### `cancel-run`
+Gracefully stop an active run loop (stops scheduling new subtasks and exits with partial results).
+
+```bash
+python -m closed_claw.cli cancel-run <run_id>
+```
+
 ### `tools`
 List supported tools and optionally show one agent's tool allowlist.
 

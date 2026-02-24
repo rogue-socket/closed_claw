@@ -21,6 +21,7 @@ def _settings(provider: str, generic_key: str = "", openai_key: str = "", gemini
         agent_retries=2,
         circuit_breaker_failures=3,
         circuit_breaker_reset_sec=120,
+        task_pool_poll_interval_sec=30,
         require_sqlite_vec=False,
         llm_provider=provider,
         llm_model="model-x",

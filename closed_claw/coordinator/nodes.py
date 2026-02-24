@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -10,7 +11,11 @@ from closed_claw.embeddings.provider import EmbeddingProvider
 from closed_claw.observability.runlog import RunLogger
 from closed_claw.policy.approval import ApprovalGate, ApprovalRequest
 from closed_claw.policy.audit import AuditStore
-from closed_claw.registry.search import RerankerProtocol
+from closed_claw.registry.search import (
+    RerankerProtocol,
+    generate_agent_profile,
+    generate_task_plan,
+)
 from closed_claw.registry.store import AgentManifest, RegistryStore, SearchCandidate
 from closed_claw.runtime.protocol import (
     ApiCallDecision,
@@ -20,7 +25,12 @@ from closed_claw.runtime.protocol import (
     ToolCallResult,
 )
 from closed_claw.runtime.runner import AgentRunner, AgentRuntimeError
-from closed_claw.tools.executor import ToolExecutionError, ToolExecutor
+from closed_claw.tools.executor import (
+    SUPPORTED_TOOLS,
+    ToolExecutionError,
+    ToolExecutor,
+    tool_registry_for_allowlist,
+)
 
 
 class CoordinatorNodes:
@@ -75,8 +85,32 @@ class CoordinatorNodes:
             approvals=[],
             tool_events=[],
             failed_agents=[],
+            subtask_pool=[],
+            role_agent_map={},
+            subtask_results={},
         )
         self._emit_runlog(merged, "task_ingested", {"task": task, "session_id": merged["session_id"]})
+        return merged
+
+    async def decompose_task(self, state: dict[str, Any]) -> dict[str, Any]:
+        plan = generate_task_plan(self.settings, state["task"])
+        pool = [
+            {
+                **item,
+                "status": "waiting" if item.get("depends_on") else "pending",
+                "assigned_agent_id": None,
+                "result": "",
+                "error": "",
+            }
+            for item in plan
+        ]
+        merged = self._merge(state, subtask_pool=pool)
+        self._emit_runlog(
+            merged,
+            "task_plan_created",
+            {"subtask_count": len(pool), "subtasks": self._task_pool_snapshot(pool)},
+        )
+        self._emit_task_pool(merged, pool)
         return merged
 
     async def embed_task(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -195,8 +229,8 @@ class CoordinatorNodes:
             embedding_vector=self.embedder.embed(description),
             tools_allowlist=tool_allowlist,
             tags=profile["tags"],
-            api_capabilities=["external_paid_api"],
-            requires_approval_for=["external_paid_api"],
+            api_capabilities=profile.get("api_capabilities", []),
+            requires_approval_for=profile.get("requires_approval_for", []),
             skill_content=skill_content,
         )
         self.registry.upsert_manifest(manifest)
@@ -221,101 +255,209 @@ class CoordinatorNodes:
         )
         return merged
 
-    @staticmethod
-    def _infer_general_tool_allowlist(task: str) -> list[str]:
-        base = {"file_io"}
-        t = task.lower()
-        if any(word in t for word in ["shell", "terminal", "command", "cli"]):
-            base.add("terminal")
-        if any(word in t for word in ["api", "http", "endpoint", "request"]):
-            base.add("http_api")
-        if any(word in t for word in ["web", "fetch", "url", "site"]):
-            base.add("web_fetch")
-        if any(word in t for word in ["python", "script", "code"]):
-            base.add("python_exec")
-        if any(word in t for word in ["sql", "query", "database", "sqlite"]):
-            base.add("sql_query")
-        # reasonable general-purpose baseline for spawned agents
-        base.update({"terminal", "http_api"})
-        return sorted(base)
+    async def execute_task_pool(self, state: dict[str, Any]) -> dict[str, Any]:
+        pool = [dict(item) for item in state.get("subtask_pool", [])]
+        if not pool:
+            pool = [
+                {
+                    "task_id": "task-1",
+                    "title": "Execute User Task",
+                    "description": state["task"],
+                    "role_tag": "general-operator",
+                    "depends_on": [],
+                    "acceptance_criteria": ["Task is completed and reported."],
+                    "status": "pending",
+                    "assigned_agent_id": None,
+                    "result": "",
+                    "error": "",
+                }
+            ]
+
+        approvals = list(state.get("approvals", []))
+        tool_events = list(state.get("tool_events", []))
+        api_mode = (state.get("runtime_policies", {}) or {}).get(
+            "api_approval_mode", self.settings.api_approval_mode
+        )
+        role_agent_map: dict[str, str] = dict(state.get("role_agent_map", {}))
+        created_agents: list[dict[str, Any]] = list(state.get("created_agents", []))
+        subtask_results: dict[str, str] = dict(state.get("subtask_results", {}))
+
+        by_id = {item["task_id"]: item for item in pool}
+        waiting_cycles = 0
+        while True:
+            if self._is_cancel_requested(state["run_id"]):
+                for item in pool:
+                    if item["status"] in {"waiting", "pending"}:
+                        item["status"] = "cancelled"
+                        item["error"] = "cancelled_by_user"
+                self._emit_task_pool(state, pool)
+                self._emit_runlog(
+                    state,
+                    "run_cancelled",
+                    {"reason": "cancel_file_detected"},
+                )
+                break
+
+            pending_left = [t for t in pool if t["status"] in {"pending", "waiting", "in_progress"}]
+            if not pending_left:
+                break
+
+            progressed = False
+            completed_ids = {t["task_id"] for t in pool if t["status"] == "completed"}
+            failed_ids = {t["task_id"] for t in pool if t["status"] == "failed"}
+            for item in pool:
+                if item["status"] not in {"waiting", "pending"}:
+                    continue
+                deps = item.get("depends_on", []) or []
+                if any(dep in failed_ids for dep in deps):
+                    item["status"] = "failed"
+                    item["error"] = "dependency_failed"
+                    progressed = True
+                    continue
+                item["status"] = "pending" if all(dep in completed_ids for dep in deps) else "waiting"
+
+            ready = [t for t in pool if t["status"] == "pending"]
+            for item in ready:
+                progressed = True
+                role_tag = str(item.get("role_tag", "general-operator")) or "general-operator"
+                if role_tag not in role_agent_map:
+                    agent_id, created = self._acquire_agent_for_role(role_tag, item)
+                    role_agent_map[role_tag] = agent_id
+                    if created:
+                        created_agents.append(created)
+                agent_id = role_agent_map[role_tag]
+                item["assigned_agent_id"] = agent_id
+                item["status"] = "in_progress"
+                self._emit_task_pool(state, pool)
+
+                dep_context = {
+                    dep: by_id[dep].get("result", "")
+                    for dep in item.get("depends_on", [])
+                    if dep in by_id
+                }
+                criteria = item.get("acceptance_criteria", [])
+                task_payload = (
+                    f"{item.get('description', '')}\n\n"
+                    "Acceptance criteria:\n"
+                    + "\n".join(f"- {c}" for c in criteria)
+                ).strip()
+                req = CoordinatorRequest(
+                    session_id=state["session_id"],
+                    task=task_payload,
+                    context={
+                        **(state.get("context", {}) or {}),
+                        "parent_task": state["task"],
+                        "subtask": {
+                            "task_id": item["task_id"],
+                            "title": item.get("title", ""),
+                            "role_tag": role_tag,
+                            "depends_on_results": dep_context,
+                        },
+                    },
+                    config=self._request_config_for_agent(agent_id),
+                )
+                entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
+                tool_events_start = len(tool_events)
+                try:
+                    response = await self.runner.run_agent(
+                        agent_id=agent_id,
+                        entrypoint=entrypoint,
+                        request=req,
+                        approval_callback=lambda intent, a_id: self._approval_callback(
+                            intent=intent,
+                            agent_id=a_id,
+                            run_id=state["run_id"],
+                            approvals=approvals,
+                            mode=api_mode,
+                        ),
+                        tool_callback=lambda intent, a_id: self._tool_callback(
+                            intent=intent,
+                            agent_id=a_id,
+                            run_id=state["run_id"],
+                            tool_events=tool_events,
+                        ),
+                    )
+                    if response.status == "ok":
+                        new_events = tool_events[tool_events_start:]
+                        verification_ok, verification_msg = self._verify_subtask_tool_execution(
+                            item=item,
+                            new_tool_events=new_events,
+                        )
+                        if verification_ok:
+                            item["status"] = "completed"
+                            item["result"] = response.result
+                            subtask_results[item["task_id"]] = response.result
+                        else:
+                            item["status"] = "failed"
+                            item["error"] = verification_msg or "filesystem_verification_failed"
+                    else:
+                        item["status"] = "failed"
+                        item["error"] = response.error_message or "subtask_failed"
+                except AgentRuntimeError as exc:
+                    item["status"] = "failed"
+                    item["error"] = str(exc)
+                self._emit_task_pool(state, pool)
+
+            if progressed:
+                waiting_cycles = 0
+                continue
+
+            waiting_cycles += 1
+            self._emit_task_pool(state, pool)
+            if waiting_cycles >= 2:
+                for item in pool:
+                    if item["status"] in {"waiting", "pending"}:
+                        item["status"] = "failed"
+                        item["error"] = "unresolved_dependencies"
+                break
+            await asyncio.sleep(max(1, int(self.settings.task_pool_poll_interval_sec)))
+
+        completed = [t for t in pool if t["status"] == "completed"]
+        failed = [t for t in pool if t["status"] in {"failed", "cancelled"}]
+        cancelled = [t for t in pool if t["status"] == "cancelled"]
+        status = "ok" if not failed else "error"
+        if completed:
+            result = "\n".join(
+                [
+                    "Sub-task results:",
+                    *[
+                        f"- [{t['task_id']}] ({t.get('role_tag','')}) {t.get('title','')}: {t.get('result','')}"
+                        for t in completed
+                    ],
+                ]
+            )
+        else:
+            result = ""
+
+        return self._merge(
+            state,
+            response_status=status,
+            response_result=result,
+            response_error=(
+                ""
+                if status == "ok"
+                else (
+                    "cancelled_by_user"
+                    if cancelled
+                    else "One or more subtasks failed"
+                )
+            ),
+            selected_agent_id=next(iter(role_agent_map.values()), state.get("selected_agent_id", "unknown")),
+            role_agent_map=role_agent_map,
+            created_agents=created_agents,
+            subtask_pool=pool,
+            subtask_results=subtask_results,
+            approvals=approvals,
+            tool_events=tool_events,
+        )
 
     def _select_capability_profile(self, task: str) -> dict[str, Any]:
-        t = task.lower()
-        if any(word in t for word in ["file", "folder", "directory", "organize", "organise", "rename", "move"]):
-            return {
-                "profile_id": "filesystem_terminal_expert",
-                "name_prefix": "Filesystem Terminal Expert",
-                "description": (
-                    "Terminal-first filesystem expert for inspecting, organizing, moving, and validating files "
-                    "and directories safely."
-                ),
-                "tools_allowlist": ["terminal", "file_io", "python_exec"],
-                "tags": ["auto", "capability", "filesystem_terminal_expert", "terminal", "filesystem"],
-                "skill_md": (
-                    "# Filesystem Terminal Expert\n\n"
-                    "You are a terminal and filesystem operations expert.\n"
-                    "Use shell-first workflows for listing, classifying, moving, renaming, and validating files.\n"
-                    "Before mutating files: inspect paths, show plan, then execute safely and report exact changes.\n"
-                ),
-            }
-        if any(word in t for word in ["api", "endpoint", "http", "request", "rest", "webhook"]):
-            return {
-                "profile_id": "api_integration_expert",
-                "name_prefix": "API Integration Expert",
-                "description": (
-                    "API integration expert for HTTP endpoints, request design, retries, validation, and response "
-                    "analysis."
-                ),
-                "tools_allowlist": ["http_api", "web_fetch", "python_exec", "terminal"],
-                "tags": ["auto", "capability", "api_integration_expert", "api"],
-                "skill_md": (
-                    "# API Integration Expert\n\n"
-                    "You design and execute reliable API calls with clear validation and error handling.\n"
-                    "Explain assumptions, inspect payloads, and return structured outputs.\n"
-                ),
-            }
-        if any(word in t for word in ["web", "website", "url", "search", "scrape", "fetch"]):
-            return {
-                "profile_id": "web_research_expert",
-                "name_prefix": "Web Research Expert",
-                "description": "Web research expert for gathering, validating, and summarizing online information.",
-                "tools_allowlist": ["web_fetch", "http_api", "python_exec"],
-                "tags": ["auto", "capability", "web_research_expert", "web"],
-                "skill_md": (
-                    "# Web Research Expert\n\n"
-                    "You gather web evidence, verify sources, and synthesize concise factual outputs.\n"
-                    "Prioritize source quality and date-aware reasoning.\n"
-                ),
-            }
-        if any(word in t for word in ["sql", "database", "query", "sqlite", "table"]):
-            return {
-                "profile_id": "data_sql_expert",
-                "name_prefix": "Data SQL Expert",
-                "description": "Data and SQL expert for query writing, schema inspection, and analytical workflows.",
-                "tools_allowlist": ["sql_query", "python_exec", "file_io", "terminal"],
-                "tags": ["auto", "capability", "data_sql_expert", "sql", "data"],
-                "skill_md": (
-                    "# Data SQL Expert\n\n"
-                    "You are an expert in SQL and data analysis workflows.\n"
-                    "Write safe queries, validate assumptions, and present clear analytical results.\n"
-                ),
-            }
-
-        return {
-            "profile_id": "general_terminal_operator",
-            "name_prefix": "General Terminal Operator",
-            "description": (
-                "General operations expert that executes diverse technical tasks using terminal, files, and "
-                "automation tools."
-            ),
-            "tools_allowlist": self._infer_general_tool_allowlist(task),
-            "tags": ["auto", "capability", "general_terminal_operator", "generalist"],
-            "skill_md": (
-                "# General Terminal Operator\n\n"
-                "You execute broad technical tasks with pragmatic terminal-first workflows.\n"
-                "Break work into steps, run safely, and report concrete outcomes.\n"
-            ),
-        }
+        return generate_agent_profile(
+            settings=self.settings,
+            task=task,
+            supported_tools=SUPPORTED_TOOLS,
+            fallback_tools=SUPPORTED_TOOLS,
+        )
 
     def _find_reusable_capability_agent(self, profile: dict[str, Any]) -> str | None:
         # Reuse by capability first to avoid creating niche one-off agents.
@@ -330,6 +472,75 @@ class CoordinatorNodes:
             if profile_id in tags:
                 return manifest.agent_id
         return None
+
+    def _acquire_agent_for_role(
+        self,
+        role_tag: str,
+        subtask: dict[str, Any],
+    ) -> tuple[str, dict[str, Any] | None]:
+        role_prompt = (
+            f"Role tag: {role_tag}. "
+            f"Subtask title: {subtask.get('title', '')}. "
+            f"Subtask description: {subtask.get('description', '')}"
+        )
+        profile = self._select_capability_profile(role_prompt)
+        role_slug = role_tag.strip().lower().replace(" ", "-")
+        if role_slug and role_slug not in profile["tags"]:
+            profile["tags"] = [*profile["tags"], role_slug]
+        reusable_agent_id = self._find_reusable_capability_agent(profile)
+        if reusable_agent_id:
+            return reusable_agent_id, None
+
+        name = f"{profile['name_prefix']} {uuid.uuid4().hex[:4]}"
+        skill_content = profile["skill_md"]
+        manifest = self.factory.create_capsule(
+            name=name,
+            description=profile["description"],
+            embedding_model=self.settings.embedding_model,
+            embedding_vector=self.embedder.embed(profile["description"]),
+            tools_allowlist=profile["tools_allowlist"],
+            tags=profile["tags"],
+            api_capabilities=profile.get("api_capabilities", []),
+            requires_approval_for=profile.get("requires_approval_for", []),
+            skill_content=skill_content,
+        )
+        self.registry.upsert_manifest(manifest)
+        self._sync_registry_index()
+        created_agent = {
+            "agent_id": manifest.agent_id,
+            "name": manifest.name,
+            "description": manifest.description,
+            "profile_id": profile["profile_id"],
+            "tools_allowlist": manifest.tools_allowlist,
+            "skill_md": skill_content,
+            "role_tag": role_tag,
+        }
+        return manifest.agent_id, created_agent
+
+    def _task_pool_snapshot(self, pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "task_id": item.get("task_id"),
+                "title": item.get("title"),
+                "role_tag": item.get("role_tag"),
+                "depends_on": item.get("depends_on", []),
+                "status": item.get("status"),
+                "assigned_agent_id": item.get("assigned_agent_id"),
+                "error": item.get("error", ""),
+            }
+            for item in pool
+        ]
+
+    def _emit_task_pool(self, state: dict[str, Any], pool: list[dict[str, Any]]) -> None:
+        self._emit_runlog(
+            state,
+            "task_pool_update",
+            {"tasks": self._task_pool_snapshot(pool)},
+        )
+
+    def _is_cancel_requested(self, run_id: str) -> bool:
+        cancel_path = self.settings.run_logs_dir / f"{run_id}.cancel"
+        return cancel_path.exists()
 
     async def dispatch_agents_async(self, state: dict[str, Any]) -> dict[str, Any]:
         selected = state["selected_agent_id"]
@@ -349,7 +560,7 @@ class CoordinatorNodes:
                 session_id=state["session_id"],
                 task=state["task"],
                 context=state.get("context", {}),
-                config={"timeout_s": self.settings.agent_timeout_sec},
+                config=self._request_config_for_agent(agent_id),
             )
             approvals = list(state.get("approvals", []))
             tool_events = list(state.get("tool_events", []))
@@ -558,18 +769,41 @@ class CoordinatorNodes:
         allowlist = manifest.tools_allowlist if manifest else []
         try:
             result = self.tool_executor.execute(intent.tool, intent.args, allowlist)
+            semantic_ok, semantic_error = self._evaluate_tool_result(intent.tool, intent.args, result)
             event = {
                 "tool": intent.tool,
-                "ok": True,
+                "ok": semantic_ok,
                 "reason": intent.reason,
+                "args": intent.args,
+                "agent_id": agent_id,
+                "result": result,
             }
+            if not semantic_ok:
+                event["error"] = semantic_error
             tool_events.append(event)
             self.audit.record_event(
                 "tool_call",
-                {"tool": intent.tool, "args": intent.args, "ok": True},
+                {"tool": intent.tool, "args": intent.args, "ok": semantic_ok, "error": semantic_error},
                 run_id=run_id,
                 agent_id=agent_id,
             )
+            self._emit_runlog(
+                {"run_id": run_id},
+                "tool_call",
+                {
+                    "agent_id": agent_id,
+                    "tool": intent.tool,
+                    "ok": semantic_ok,
+                    "reason": intent.reason,
+                    "args": intent.args,
+                    "result": {
+                        "returncode": result.get("returncode") if isinstance(result, dict) else None,
+                    },
+                    "error": semantic_error,
+                },
+            )
+            if not semantic_ok:
+                return ToolCallResult(ok=False, result=result, error=semantic_error)
             return ToolCallResult(ok=True, result=result, error="")
         except ToolExecutionError as exc:
             event = {
@@ -577,6 +811,8 @@ class CoordinatorNodes:
                 "ok": False,
                 "error": str(exc),
                 "reason": intent.reason,
+                "args": intent.args,
+                "agent_id": agent_id,
             }
             tool_events.append(event)
             self.audit.record_event(
@@ -590,6 +826,18 @@ class CoordinatorNodes:
                 run_id=run_id,
                 agent_id=agent_id,
             )
+            self._emit_runlog(
+                {"run_id": run_id},
+                "tool_call",
+                {
+                    "agent_id": agent_id,
+                    "tool": intent.tool,
+                    "ok": False,
+                    "reason": intent.reason,
+                    "args": intent.args,
+                    "error": str(exc),
+                },
+            )
             return ToolCallResult(ok=False, result={}, error=str(exc))
 
     def _sync_registry_index(self) -> None:
@@ -601,3 +849,72 @@ class CoordinatorNodes:
             except Exception:
                 continue
         AgentFactory.save_registry_index(self.settings.agents_dir / "registry.json", manifests)
+
+    def _request_config_for_agent(self, agent_id: str) -> dict[str, Any]:
+        manifest = self.registry.get_manifest(agent_id)
+        allowlist = manifest.tools_allowlist if manifest else []
+        return {
+            "timeout_s": self.settings.agent_timeout_sec,
+            "agent_loop_max_steps": 12,
+            "agent_loop_llm_retries": 2,
+            "agent_loop_max_consecutive_errors": 4,
+            "tool_registry": tool_registry_for_allowlist(allowlist),
+            "llm": self._llm_runtime_config(),
+        }
+
+    def _llm_runtime_config(self) -> dict[str, Any]:
+        provider = self.settings.llm_provider.lower()
+        key = self.settings.llm_api_key.strip()
+        base_url = ""
+        if provider == "openai":
+            key = key or self.settings.openai_api_key.strip()
+            base_url = self.settings.openai_base_url
+        elif provider == "gemini":
+            key = key or self.settings.gemini_api_key.strip()
+            base_url = self.settings.gemini_base_url
+        elif provider == "claude":
+            key = key or self.settings.anthropic_api_key.strip()
+            base_url = self.settings.anthropic_base_url
+        return {
+            "provider": provider,
+            "model": self.settings.llm_model,
+            "api_key": key,
+            "base_url": base_url,
+            "timeout_s": self.settings.llm_timeout_sec,
+        }
+
+    @staticmethod
+    def _verify_subtask_tool_execution(
+        item: dict[str, Any],
+        new_tool_events: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        if not bool(item.get("requires_tool", False)):
+            return True, ""
+        if not new_tool_events:
+            return False, "required_tool_call_not_observed"
+        if any(evt.get("ok") for evt in new_tool_events):
+            return True, ""
+        errors = [str(evt.get("error", "")) for evt in new_tool_events if not evt.get("ok")]
+        return False, errors[-1] if errors else "all_tool_calls_failed"
+
+    @staticmethod
+    def _evaluate_tool_result(tool: str, args: dict[str, Any], result: dict[str, Any]) -> tuple[bool, str]:
+        if tool in {"terminal", "python_exec"}:
+            rc = int(result.get("returncode", 1))
+            return (rc == 0, result.get("stderr", "") if rc != 0 else "")
+        if tool in {"http_api", "web_fetch"}:
+            status_code = int(result.get("status_code", 0))
+            ok = 200 <= status_code < 400
+            return (ok, f"http_status_{status_code}" if not ok else "")
+        if tool == "file_io":
+            op = str(args.get("op", "read"))
+            if op == "read":
+                return ("content" in result, "missing_content" if "content" not in result else "")
+            if op == "write":
+                return (bool(result.get("written")), "write_failed")
+            if op == "append":
+                return (bool(result.get("appended")), "append_failed")
+            return (True, "")
+        if tool == "sql_query":
+            return ("rows" in result, "sql_query_missing_rows")
+        return (True, "")

@@ -41,6 +41,7 @@ class Settings:
     agent_retries: int
     circuit_breaker_failures: int
     circuit_breaker_reset_sec: int
+    task_pool_poll_interval_sec: int
     require_sqlite_vec: bool
     llm_provider: str
     llm_model: str
@@ -95,6 +96,9 @@ class Settings:
             ),
             circuit_breaker_reset_sec=int(
                 _getenv("CLOSED_CLAW_CIRCUIT_BREAKER_RESET_SEC", "120", dotenv)
+            ),
+            task_pool_poll_interval_sec=int(
+                _getenv("CLOSED_CLAW_TASK_POOL_POLL_INTERVAL_SEC", "30", dotenv)
             ),
             require_sqlite_vec=_getenv("CLOSED_CLAW_REQUIRE_SQLITE_VEC", "true", dotenv).lower()
             in {"1", "true", "yes"},

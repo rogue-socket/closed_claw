@@ -7,3 +7,6 @@
 - Implement hard guardrails before deployment
 - Add a soul.md that is the personality giver to the coordinator node
 - Add a heartbeat? cron jobs
+- Create a way to add tools, customise them
+- Add description for tools so that the coordinator llm knows how to pick them efficiently
+- Replace in-run supervisor task-pool loop with a proper background job system (durable task pool + persistent role-tag workers polling every 30s, lease/heartbeat/retry semantics, dependency resolver, and CLI `runs watch` live checklist that survives CLI exit)

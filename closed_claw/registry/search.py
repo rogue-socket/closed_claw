@@ -190,6 +190,56 @@ class LLMReranker:
         return out
 
 
+def generate_agent_profile(
+    settings: Settings,
+    task: str,
+    supported_tools: list[str],
+    fallback_tools: list[str],
+) -> dict[str, Any]:
+    provider = settings.llm_provider.lower()
+    key, base = _provider_key_and_base(settings, provider)
+    if provider == "heuristic" or not key:
+        return _heuristic_agent_profile(task, supported_tools, fallback_tools)
+
+    prompt = (
+        "You create reusable capability profiles for specialist agents.\n"
+        "Given a user task, return JSON only with keys:\n"
+        "profile_id, name_prefix, description, tools_allowlist, tags, skill_md, api_capabilities, requires_approval_for.\n"
+        f"Allowed tools: {json.dumps(supported_tools)}\n"
+        "Rules:\n"
+        "- profile must be reusable and capability-oriented, not a one-off task label.\n"
+        "- name_prefix should be concise (2-5 words).\n"
+        "- description max 28 words.\n"
+        "- tags should include 'auto' and 'capability'.\n"
+        "- skill_md should be a short markdown role guide.\n"
+        f"Task: {task.strip()}"
+    )
+    try:
+        text = _generate_text_with_provider(
+            provider=provider,
+            model=settings.llm_model,
+            api_key=key,
+            base_url=base,
+            timeout_sec=settings.llm_timeout_sec,
+            prompt=prompt,
+            max_tokens=500,
+            temperature=0.2,
+        )
+        payload = _extract_json(text)
+        if isinstance(payload, dict):
+            profile = _normalize_profile_payload(
+                payload=payload,
+                task=task,
+                supported_tools=supported_tools,
+                fallback_tools=fallback_tools,
+            )
+            if profile:
+                return profile
+    except Exception:
+        pass
+    return _heuristic_agent_profile(task, supported_tools, fallback_tools)
+
+
 def _extract_json(text: str) -> Any:
     text = text.strip()
     if not text:
@@ -333,3 +383,296 @@ def _clean_description(text: str, fallback: str) -> str:
     if not clean:
         return fallback
     return clean[:200]
+
+
+def generate_task_plan(settings: Settings, task: str) -> list[dict[str, Any]]:
+    provider = settings.llm_provider.lower()
+    key, base = _provider_key_and_base(settings, provider)
+    if provider == "heuristic" or not key:
+        return _heuristic_task_plan(task)
+
+    prompt = (
+        "You are a planning supervisor for multi-agent execution.\n"
+        "Return JSON only with shape:\n"
+        "{\"subtasks\":[{\"task_id\":str,\"title\":str,\"description\":str,\"role_tag\":str,"
+        "\"depends_on\":[str],\"acceptance_criteria\":[str],\"requires_tool\":bool}]}\n"
+        "Rules:\n"
+        "- Decompose into atomic tasks.\n"
+        "- Prefer independent tasks; only include dependencies when unavoidable.\n"
+        "- role_tag should be reusable capability labels (not person names).\n"
+        "- each acceptance_criteria entry must be verifiable.\n"
+        f"Task: {task.strip()}"
+    )
+    try:
+        text = _generate_text_with_provider(
+            provider=provider,
+            model=settings.llm_model,
+            api_key=key,
+            base_url=base,
+            timeout_sec=settings.llm_timeout_sec,
+            prompt=prompt,
+            max_tokens=800,
+            temperature=0.1,
+        )
+        payload = _extract_json(text)
+        if isinstance(payload, dict):
+            tasks = _normalize_plan_payload(payload)
+            if tasks:
+                return tasks
+    except Exception:
+        pass
+    return _heuristic_task_plan(task)
+
+
+def _provider_key_and_base(settings: Settings, provider: str) -> tuple[str, str]:
+    key = settings.llm_api_key.strip()
+    if provider == "openai":
+        key = key or settings.openai_api_key.strip()
+        return key, settings.openai_base_url.rstrip("/")
+    if provider == "gemini":
+        key = key or settings.gemini_api_key.strip()
+        return key, settings.gemini_base_url.rstrip("/")
+    if provider == "claude":
+        key = key or settings.anthropic_api_key.strip()
+        return key, settings.anthropic_base_url.rstrip("/")
+    return "", ""
+
+
+def _generate_text_with_provider(
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    timeout_sec: int,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    import httpx
+
+    if provider == "openai":
+        with httpx.Client(timeout=timeout_sec) as client:
+            resp = client.post(
+                f"{base_url}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+
+    if provider == "gemini":
+        with httpx.Client(timeout=timeout_sec) as client:
+            resp = client.post(
+                f"{base_url}/v1beta/models/{model}:generateContent",
+                params={"key": api_key},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": temperature},
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    if provider == "claude":
+        with httpx.Client(timeout=timeout_sec) as client:
+            resp = client.post(
+                f"{base_url}/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            parts = [
+                block.get("text", "")
+                for block in resp.json().get("content", [])
+                if isinstance(block, dict)
+            ]
+            return " ".join(parts)
+    raise ValueError(f"unsupported provider: {provider}")
+
+
+def _normalize_profile_payload(
+    *,
+    payload: dict[str, Any],
+    task: str,
+    supported_tools: list[str],
+    fallback_tools: list[str],
+) -> dict[str, Any]:
+    raw_name = _clean_text(str(payload.get("name_prefix", "")), default="Task Operator", max_len=60)
+    name_prefix = _to_title_words(raw_name) or "Task Operator"
+    raw_desc = _clean_text(
+        str(payload.get("description", "")),
+        default=f"Capability operator for tasks like: {task.strip()[:140]}",
+        max_len=220,
+    )
+    requested_tools = payload.get("tools_allowlist", [])
+    tools = [t for t in requested_tools if isinstance(t, str) and t in supported_tools]
+    if not tools:
+        tools = [t for t in fallback_tools if t in supported_tools]
+
+    requested_tags = payload.get("tags", [])
+    tags = [t for t in requested_tags if isinstance(t, str) and t.strip()]
+    tags = [_slug(t) for t in tags if _slug(t)]
+    tags = list(dict.fromkeys(["auto", "capability", *tags]))
+
+    profile_id = _slug(str(payload.get("profile_id", ""))) or _slug(name_prefix)
+    skill_md = str(payload.get("skill_md", "")).strip()
+    if not skill_md:
+        skill_md = (
+            f"# {name_prefix}\n\n"
+            f"You are a reusable capability agent specialized in: {raw_desc}\n"
+            "Execute requests safely and report concrete outcomes.\n"
+        )
+    elif not skill_md.startswith("#"):
+        skill_md = f"# {name_prefix}\n\n{skill_md}"
+
+    return {
+        "profile_id": profile_id,
+        "name_prefix": name_prefix,
+        "description": raw_desc,
+        "tools_allowlist": tools,
+        "tags": tags,
+        "skill_md": skill_md,
+        "api_capabilities": [
+            str(v).strip()
+            for v in payload.get("api_capabilities", [])
+            if isinstance(v, str) and str(v).strip()
+        ] if isinstance(payload.get("api_capabilities", []), list) else [],
+        "requires_approval_for": [
+            str(v).strip()
+            for v in payload.get("requires_approval_for", [])
+            if isinstance(v, str) and str(v).strip()
+        ] if isinstance(payload.get("requires_approval_for", []), list) else [],
+    }
+
+
+def _heuristic_agent_profile(task: str, supported_tools: list[str], fallback_tools: list[str]) -> dict[str, Any]:
+    terms = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", task.lower())
+    uniq: list[str] = []
+    for term in terms:
+        if term in {"please", "could", "would", "should", "using", "with", "from", "that", "this"}:
+            continue
+        if term not in uniq:
+            uniq.append(term)
+        if len(uniq) >= 2:
+            break
+    topic = " ".join(uniq).strip() or "Task"
+    name_prefix = f"{_to_title_words(topic)} Operator".strip()
+    description = f"Reusable capability operator for {task.strip()[:140]}"
+    tools = [t for t in fallback_tools if t in supported_tools] or ["terminal"]
+    profile_id = _slug(name_prefix)
+    return {
+        "profile_id": profile_id,
+        "name_prefix": name_prefix,
+        "description": description,
+        "tools_allowlist": tools,
+        "tags": ["auto", "capability", profile_id],
+        "skill_md": (
+            f"# {name_prefix}\n\n"
+            f"You are a capability-focused operator for tasks in this domain: {task.strip()}\n"
+            "Prioritize safe execution, clear plans, and concrete result reporting.\n"
+        ),
+        "api_capabilities": [],
+        "requires_approval_for": [],
+    }
+
+
+def _slug(value: str) -> str:
+    clean = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    return clean[:64]
+
+
+def _to_title_words(value: str) -> str:
+    parts = [p for p in re.split(r"[^a-zA-Z0-9]+", value) if p]
+    return " ".join(p.capitalize() for p in parts[:5])
+
+
+def _clean_text(value: str, default: str, max_len: int) -> str:
+    clean = " ".join((value or "").strip().split())
+    if not clean:
+        clean = default
+    return clean[:max_len]
+
+
+def _normalize_plan_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload.get("subtasks", [])
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for i, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        raw_id = _slug(str(item.get("task_id", ""))) or f"task-{i}"
+        task_id = raw_id
+        suffix = 2
+        while task_id in seen_ids:
+            task_id = f"{raw_id}-{suffix}"
+            suffix += 1
+        seen_ids.add(task_id)
+
+        title = _clean_text(str(item.get("title", "")), f"Subtask {i}", 80)
+        desc = _clean_text(str(item.get("description", "")), title, 260)
+        role_tag = _slug(str(item.get("role_tag", ""))) or "general-operator"
+        depends_on_raw = item.get("depends_on", [])
+        depends_on = [
+            _slug(str(dep))
+            for dep in depends_on_raw
+            if isinstance(dep, str) and _slug(str(dep))
+        ] if isinstance(depends_on_raw, list) else []
+        ac_raw = item.get("acceptance_criteria", [])
+        criteria = [
+            _clean_text(str(c), "", 160)
+            for c in ac_raw
+            if isinstance(c, str) and str(c).strip()
+        ] if isinstance(ac_raw, list) else []
+        if not criteria:
+            criteria = ["Task output is complete, correct, and explicitly reported."]
+        out.append(
+            {
+                "task_id": task_id,
+                "title": title,
+                "description": desc,
+                "role_tag": role_tag,
+                "depends_on": depends_on,
+                "acceptance_criteria": criteria,
+                "requires_tool": bool(item.get("requires_tool", False)),
+            }
+        )
+
+    valid_ids = {t["task_id"] for t in out}
+    for item in out:
+        item["depends_on"] = [dep for dep in item["depends_on"] if dep in valid_ids and dep != item["task_id"]]
+    return out
+
+
+def _heuristic_task_plan(task: str) -> list[dict[str, Any]]:
+    clean_task = _clean_text(task, "Execute task", 260)
+    return [
+        {
+            "task_id": "task-1",
+            "title": "Execute User Task",
+            "description": clean_task,
+            "role_tag": "general-operator",
+            "depends_on": [],
+            "acceptance_criteria": [
+                "All explicit user requirements are addressed.",
+                "Final output summarizes what was done and resulting artifacts.",
+            ],
+            "requires_tool": False,
+        }
+    ]

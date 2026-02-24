@@ -67,3 +67,16 @@ def test_delete_agent(tmp_path: Path):
     assert store.delete_agent("agent-delete") is True
     assert store.get_manifest("agent-delete") is None
     assert store.delete_agent("agent-delete") is False
+
+
+def test_registry_init_without_sqlite_vec_outside_pytest_env(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    db_path = tmp_path / "reg.db"
+    schema_path = Path(__file__).resolve().parents[2] / "closed_claw/registry/schema.sql"
+    store = RegistryStore(
+        db_path=db_path,
+        schema_path=schema_path,
+        embedding_dim=4,
+        require_sqlite_vec=False,
+    )
+    assert store.list_agents(limit=1) == []

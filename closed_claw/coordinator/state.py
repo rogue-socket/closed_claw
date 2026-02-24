@@ -28,3 +28,6 @@ class CoordinatorState(TypedDict, total=False):
     artifacts: list[dict[str, Any]]
     memory_updates: list[dict[str, Any]]
     failed_agents: list[str]
+    subtask_pool: list[dict[str, Any]]
+    role_agent_map: dict[str, str]
+    subtask_results: dict[str, str]

@@ -28,10 +28,11 @@ class AgentRuntimeError(RuntimeError):
 
 
 class AgentRunner:
-    def __init__(self, timeout_sec: int = 120, retries: int = 2) -> None:
+    def __init__(self, timeout_sec: int = 120, retries: int = 2, max_intents: int = 50) -> None:
         """Initialize the instance."""
         self.timeout_sec = timeout_sec
         self.retries = retries
+        self.max_intents = max_intents
 
     async def run_agent(
         self,
@@ -76,17 +77,31 @@ class AgentRunner:
         await proc.stdin.drain()
 
         final: AgentResponse | None = None
+        intent_count = 0
         while True:
             line = await proc.stdout.readline()
             if not line:
                 break
             parsed = parse_agent_line(line.decode("utf-8"))
             if isinstance(parsed, ApiCallIntent):
+                intent_count += 1
+                if intent_count > self.max_intents:
+                    # Kill the subprocess — it has exceeded the intent limit.
+                    proc.kill()
+                    raise AgentRuntimeError(
+                        f"Agent {agent_id} exceeded max intents ({self.max_intents})"
+                    )
                 decision = await approval_callback(parsed, agent_id)
                 proc.stdin.write((decision.model_dump_json() + "\n").encode("utf-8"))
                 await proc.stdin.drain()
                 continue
             if isinstance(parsed, ToolCallIntent):
+                intent_count += 1
+                if intent_count > self.max_intents:
+                    proc.kill()
+                    raise AgentRuntimeError(
+                        f"Agent {agent_id} exceeded max intents ({self.max_intents})"
+                    )
                 result = await tool_callback(parsed, agent_id)
                 proc.stdin.write((result.model_dump_json() + "\n").encode("utf-8"))
                 await proc.stdin.drain()

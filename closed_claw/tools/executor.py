@@ -46,7 +46,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         },
     },
     "python_exec": {
-        "description": "Execute a short Python snippet.",
+        "description": (
+            "Execute a short Python snippet. "
+            "IMPORTANT: stdin is closed — code must NOT use input(), sys.stdin, "
+            "or any interactive prompts. Use hardcoded values or function args instead. "
+            "Scripts with input() will receive immediate EOF and fail."
+        ),
         "args_schema": {"code": "string", "timeout_s": "int(optional)"},
     },
     "sql_query": {
@@ -238,23 +243,52 @@ class ToolExecutor:
             return {"appended": True, "path": str(path)}
         raise ToolExecutionError("file_io op must be list|read|write|append")
 
+    # Patterns that indicate a script reads from stdin and would block forever.
+    _INTERACTIVE_PATTERNS = (
+        "input(", "sys.stdin", "raw_input(", "fileinput.input(",
+    )
+
     def _python_exec(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Run python exec."""
+        """Run python exec.
+
+        Stdin is closed (subprocess.DEVNULL) so scripts containing ``input()``
+        receive immediate EOF instead of hanging until timeout.  An explicit
+        warning is injected into stderr when interactive patterns are detected.
+        """
         code = str(args.get("code", "")).strip()
         if not code:
             raise ToolExecutionError("python_exec requires 'code'")
         timeout_s = int(args.get("timeout_s", 15))
+
+        # Detect interactive stdin patterns — warn but still run (stdin is
+        # closed via DEVNULL so the script will get immediate EOF / EOFError).
+        interactive_warning = ""
+        code_lower = code.lower()
+        for pattern in self._INTERACTIVE_PATTERNS:
+            if pattern in code_lower:
+                interactive_warning = (
+                    f"WARNING: code contains '{pattern}' which reads from stdin. "
+                    "stdin is closed in python_exec — the script will receive "
+                    "immediate EOF.  Rewrite the code to use function arguments "
+                    "or hardcoded values instead of interactive input().\n"
+                )
+                break
+
         proc = subprocess.run(
             [sys.executable, "-c", code],
             cwd=self.workspace_root,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
+        stderr = proc.stderr
+        if interactive_warning:
+            stderr = interactive_warning + stderr
         return {
             "returncode": proc.returncode,
             "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stderr": stderr,
         }
 
     def _sql_query(self, args: dict[str, Any]) -> dict[str, Any]:

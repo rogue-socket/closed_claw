@@ -61,6 +61,9 @@ class Settings:
     siemens_base_url: str
     extra_allowed_paths: list[Path]
     subtask_max_attempts: int = 2
+    max_tool_calls_per_agent: int = 50
+    max_agents_per_run: int = 10
+    max_subtasks_per_phase: int = 4
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -111,6 +114,18 @@ class Settings:
             subtask_max_attempts=max(
                 1,
                 int(_getenv("CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS", "2", dotenv)),
+            ),
+            max_tool_calls_per_agent=max(
+                1,
+                int(_getenv("CLOSED_CLAW_MAX_TOOL_CALLS_PER_AGENT", "50", dotenv)),
+            ),
+            max_agents_per_run=max(
+                1,
+                int(_getenv("CLOSED_CLAW_MAX_AGENTS_PER_RUN", "10", dotenv)),
+            ),
+            max_subtasks_per_phase=max(
+                1,
+                int(_getenv("CLOSED_CLAW_MAX_SUBTASKS_PER_PHASE", "4", dotenv)),
             ),
             require_sqlite_vec=_getenv("CLOSED_CLAW_REQUIRE_SQLITE_VEC", "true", dotenv).lower()
             in {"1", "true", "yes"},

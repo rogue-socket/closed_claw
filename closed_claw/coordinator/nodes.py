@@ -447,10 +447,14 @@ class CoordinatorNodes:
 
     def _prepare_phase_pool(self, plan: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
         """Run prepare phase pool."""
+        # Cap number of subtasks to prevent unbounded growth
+        max_subtasks = max(1, self.settings.max_subtasks_per_phase)
+        capped_plan = plan[:max_subtasks]
+
         prefix = "discover" if phase == "discovery" else "execute"
         id_map: dict[str, str] = {}
         used_ids: set[str] = set()
-        for index, item in enumerate(plan, start=1):
+        for index, item in enumerate(capped_plan, start=1):
             original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
             base = original if original.startswith(f"{prefix}-") else f"{prefix}-{original}"
             task_id = base
@@ -462,7 +466,7 @@ class CoordinatorNodes:
             id_map[original] = task_id
 
         pool: list[dict[str, Any]] = []
-        for index, item in enumerate(plan, start=1):
+        for index, item in enumerate(capped_plan, start=1):
             original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
             task_id = id_map[original]
             deps = []
@@ -533,7 +537,24 @@ class CoordinatorNodes:
         """Asynchronously run execute phase pool."""
         by_id = {item["task_id"]: item for item in pool}
         waiting_cycles = 0
+        # Guardrails: limit total iterations and agent creation to prevent infinite loops
+        max_pool_iterations = len(pool) * max(1, int(self.settings.subtask_max_attempts)) + 5
+        max_agents = max(1, self.settings.max_agents_per_run)
+        pool_iteration = 0
+        agents_created_in_phase = 0
         while True:
+            pool_iteration += 1
+            if pool_iteration > max_pool_iterations:
+                for item in pool:
+                    if item["status"] in {"waiting", "pending", "in_progress"}:
+                        item["status"] = "failed"
+                        item["error"] = "max_pool_iterations_exceeded"
+                self._emit_runlog(
+                    state,
+                    "pool_iteration_limit_reached",
+                    {"phase": phase, "max_iterations": max_pool_iterations},
+                )
+                break
             if self._is_cancel_requested(state["run_id"]):
                 for item in pool:
                     if item["status"] in {"waiting", "pending"}:
@@ -595,9 +616,19 @@ class CoordinatorNodes:
                         break
 
                     if role_tag not in role_agent_map:
+                        if agents_created_in_phase >= max_agents:
+                            item["status"] = "failed"
+                            item["error"] = f"max_agents_per_run_exceeded ({max_agents})"
+                            self._emit_runlog(
+                                state,
+                                "agent_creation_limit_reached",
+                                {"phase": phase, "max_agents": max_agents, "task_id": item.get("task_id")},
+                            )
+                            break
                         agent_id, created = self._acquire_agent_for_role(role_tag, item)
                         role_agent_map[role_tag] = agent_id
                         if created:
+                            agents_created_in_phase += 1
                             created_agents.append(created)
                             self._emit_runlog(
                                 state,
@@ -699,33 +730,37 @@ class CoordinatorNodes:
                             ),
                         )
                         if response.status == "ok":
-                            new_events = tool_events[tool_events_start:]
-                            verification_ok, verification_msg = self._verify_subtask_tool_execution(
-                                item=item,
-                                new_tool_events=new_events,
-                            )
-                            if verification_ok:
-                                item["status"] = "completed"
-                                item["error"] = ""
-                                item["result"] = response.result
-                                subtask_results[item["task_id"]] = response.result
-                                subtask_results[f"{phase}.{item['task_id']}"] = response.result
-                                self._emit_runlog(
-                                    state,
-                                    "subtask_attempt_succeeded",
-                                    {
-                                        "phase": phase,
-                                        "task_id": item.get("task_id"),
-                                        "title": item.get("title", ""),
-                                        "attempt": attempt_idx,
-                                        "agent_id": agent_id,
-                                        "result": (response.result or "")[:2000],
-                                        "tool_calls_in_attempt": len(new_events),
-                                        "memory_updates": response.memory_updates[:5] if response.memory_updates else [],
-                                    },
+                            # Detect agent LLM errors disguised as successful results
+                            if response.result and response.result.strip().startswith("[llm_error:"):
+                                failure_reason = f"agent_llm_failure: {response.result[:200]}"
+                            else:
+                                new_events = tool_events[tool_events_start:]
+                                verification_ok, verification_msg = self._verify_subtask_tool_execution(
+                                    item=item,
+                                    new_tool_events=new_events,
                                 )
-                                break
-                            failure_reason = verification_msg or "filesystem_verification_failed"
+                                if verification_ok:
+                                    item["status"] = "completed"
+                                    item["error"] = ""
+                                    item["result"] = response.result
+                                    subtask_results[item["task_id"]] = response.result
+                                    subtask_results[f"{phase}.{item['task_id']}"] = response.result
+                                    self._emit_runlog(
+                                        state,
+                                        "subtask_attempt_succeeded",
+                                        {
+                                            "phase": phase,
+                                            "task_id": item.get("task_id"),
+                                            "title": item.get("title", ""),
+                                            "attempt": attempt_idx,
+                                            "agent_id": agent_id,
+                                            "result": (response.result or "")[:2000],
+                                            "tool_calls_in_attempt": len(new_events),
+                                            "memory_updates": response.memory_updates[:5] if response.memory_updates else [],
+                                        },
+                                    )
+                                    break
+                                failure_reason = verification_msg or "filesystem_verification_failed"
                         else:
                             failure_reason = response.error_message or "subtask_failed"
                     except AgentRuntimeError as exc:
@@ -1469,9 +1504,10 @@ class CoordinatorNodes:
         system_prompt = self._compose_system_prompt(agent_id, manifest)
         return {
             "timeout_s": self.settings.agent_timeout_sec,
-            "agent_loop_max_steps": 12,
+            "agent_loop_max_steps": min(12, self.settings.max_tool_calls_per_agent),
             "agent_loop_llm_retries": 2,
             "agent_loop_max_consecutive_errors": 4,
+            "max_tool_calls_per_agent": self.settings.max_tool_calls_per_agent,
             "tool_registry": tool_registry_for_allowlist(allowlist),
             "system_prompt": system_prompt,
             "skill_ids": skill_ids,

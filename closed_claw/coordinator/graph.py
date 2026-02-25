@@ -35,7 +35,11 @@ def build_graph(settings: Settings) -> Any:
         registry=registry,
         reranker=build_reranker(settings),
         embedder=EmbeddingProvider(settings.embedding_model, settings.embedding_dim),
-        runner=AgentRunner(timeout_sec=settings.agent_timeout_sec, retries=settings.agent_retries),
+        runner=AgentRunner(
+            timeout_sec=settings.agent_timeout_sec,
+            retries=settings.agent_retries,
+            max_intents=settings.max_tool_calls_per_agent,
+        ),
         factory=AgentFactory(settings.agents_dir),
         approval_gate=ApprovalGate(timeout_sec=settings.api_approval_timeout_sec),
         audit=AuditStore(settings.db_path),

@@ -1148,6 +1148,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _active_runs[run_id]["status"] = "cancelled"
         return {"cancel_requested": True, "run_id": run_id}
 
+    # -------------------------------------------------- SSE global event stream
+    @app.get("/api/events/stream")
+    def global_event_stream() -> StreamingResponse:
+        """SSE stream of dashboard-level state changes.
+
+        Pushes lightweight JSON messages whenever active-run status, pending
+        approvals, or system status change so the UI can react without polling.
+        """
+        def _gen() -> Generator[str, None, None]:
+            prev_snapshot: str = ""
+            idle_ticks = 0
+            while idle_ticks < 600:  # ~5min inactivity timeout
+                snapshot_data: dict[str, Any] = {
+                    "active_runs": [
+                        {
+                            "run_id": rid,
+                            "status": info["status"],
+                            "current_node": info.get("current_node", "unknown"),
+                            "task": (info.get("task") or "")[:120],
+                            "started_at": info.get("started_at"),
+                            "finished_at": info.get("finished_at"),
+                            "error": (info.get("error") or "")[:200],
+                        }
+                        for rid, info in _active_runs.items()
+                    ],
+                    "pending_approvals": len(get_pending_approvals()),
+                }
+                cur_snapshot = json.dumps(snapshot_data, sort_keys=True)
+                if cur_snapshot != prev_snapshot:
+                    prev_snapshot = cur_snapshot
+                    yield f"data: {json.dumps(snapshot_data)}\n\n"
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
+                    # Send keepalive comment every 15s of no-change to prevent
+                    # proxy/browser timeouts
+                    if idle_ticks % 30 == 0:
+                        yield ":keepalive\n\n"
+                time.sleep(0.5)
+            yield f"data: {json.dumps({'event': 'stream_end'})}\n\n"
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     # ------------------------------------------------------------- init
     @app.post("/api/init")
     def init_system() -> dict[str, Any]:

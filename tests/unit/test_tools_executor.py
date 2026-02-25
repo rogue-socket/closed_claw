@@ -86,3 +86,44 @@ def test_normalize_does_not_overwrite_canonical(tmp_path: Path):
     )
     assert out["returncode"] == 0
     assert "canonical" in out["stdout"]
+
+
+# ── python_exec stdin guardrails ─────────────────────────────────────────────
+
+
+def test_python_exec_stdin_closed(tmp_path: Path):
+    """python_exec should close stdin so input() gets immediate EOF, not hang."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    out = executor.execute(
+        "python_exec",
+        {"code": "x = input('prompt: ')\nprint(x)", "timeout_s": 5},
+        allowlist=["python_exec"],
+    )
+    # Script should fail fast with EOFError, NOT hang until timeout
+    assert out["returncode"] != 0
+    assert "EOFError" in out["stderr"] or "EOF" in out["stderr"]
+
+
+def test_python_exec_interactive_warning(tmp_path: Path):
+    """python_exec should inject a warning when code contains input()."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    out = executor.execute(
+        "python_exec",
+        {"code": "x = input('name: ')", "timeout_s": 5},
+        allowlist=["python_exec"],
+    )
+    assert "WARNING" in out["stderr"]
+    assert "input(" in out["stderr"]
+
+
+def test_python_exec_no_warning_for_normal_code(tmp_path: Path):
+    """python_exec should NOT warn when code has no interactive patterns."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    out = executor.execute(
+        "python_exec",
+        {"code": "print('hello world')"},
+        allowlist=["python_exec"],
+    )
+    assert out["returncode"] == 0
+    assert "WARNING" not in out["stderr"]
+    assert "hello world" in out["stdout"]

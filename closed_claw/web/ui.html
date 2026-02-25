@@ -230,7 +230,6 @@ const state = {
   selectedRunDetailId: null,
   selectedAgentId: null,
   systemStatus: { status: 'offline', checks: {} },
-  refreshTimer: null,
   runFilters: {
     search: '', status: 'all', agent: 'all', stage: 'all', tool: 'all',
     sort: 'created_desc', preset: 'none'
@@ -352,19 +351,83 @@ function filterByRange(items, tsKey = 'created_at') {
   });
 }
 
-// ── Smart polling: only fetch what the current view needs ───────────────
-const POLL_IDLE_MS  = 30000;  // 30s when no active runs
-const POLL_ACTIVE_MS = 5000;  // 5s when runs are in-flight
+// ── Smart updates: SSE for live push + on-demand fetch ──────────────
+// Global SSE stream pushes active-run status and approval count changes.
+// Heavy endpoints (runs/enriched, agents, audit) are fetched only when
+// the user navigates to the view that needs them — NOT on a timer.
+let _globalSSE = null;
+let _sseConnected = false;
+const POLL_FALLBACK_MS = 60000;  // fallback poll only when SSE is down
+let _pollTimer = null;
+
+function _startFallbackPoll() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(async () => {
+    if (_sseConnected) return;  // SSE recovered — skip
+    await refreshCore();
+    if (['overview', 'active-runs'].includes(state.view)) await refreshView();
+  }, POLL_FALLBACK_MS);
+}
+function _stopFallbackPoll() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+function connectGlobalSSE() {
+  if (_globalSSE) return;
+  if (typeof EventSource === 'undefined') { _startFallbackPoll(); return; }
+  _globalSSE = new EventSource('/api/events/stream');
+  _globalSSE.onopen = () => {
+    _sseConnected = true;
+    _stopFallbackPoll();  // SSE is live — no need to poll
+  };
+  _globalSSE.onmessage = (evt) => {
+    let data;
+    try { data = JSON.parse(evt.data); } catch { return; }
+    if (data.event === 'stream_end') {
+      _globalSSE.close(); _globalSSE = null;
+      _sseConnected = false; _startFallbackPoll();
+      return;
+    }
+    // Update lightweight state without re-fetching heavy endpoints
+    const prevActive = state.activeRuns.filter(r => String(r.status) === 'running').length;
+    state.activeRuns = data.active_runs || [];
+    const nowActive = state.activeRuns.filter(r => String(r.status) === 'running').length;
+    const approvalCount = data.pending_approvals || 0;
+    const approvalChanged = approvalCount !== state.approvals.length;
+
+    renderNav();
+    renderApprovalsBadge();
+
+    // Fetch full approval details if count changed (SSE only pushes count)
+    if (approvalChanged) {
+      api('/api/approvals/pending').then(a => { state.approvals = a || []; renderApprovalsBadge(); });
+    }
+
+    // If active run count changed, re-render relevant views
+    if (prevActive !== nowActive || approvalChanged) {
+      if (state.view === 'overview') refreshView();
+      if (state.view === 'active-runs') renderActiveRuns();
+    }
+    // If a run just finished, refresh the current view to pick up new data
+    if (prevActive > 0 && nowActive === 0) refreshView();
+  };
+  _globalSSE.onerror = () => {
+    _globalSSE.close();
+    _globalSSE = null;
+    _sseConnected = false;
+    _startFallbackPoll();  // SSE lost — enable fallback polling
+    // Retry SSE connection after a delay
+    setTimeout(connectGlobalSSE, 15000);
+  };
+}
 
 async function refreshCore() {
-  // Lightweight endpoints always polled — needed for status pill, badges, nav
-  const [activeRuns, approvals, sysStatus, health] = await Promise.all([
-    api('/api/runs/active'),
+  // Only fetch what SSE doesn't cover: approvals detail + system status + health
+  const [approvals, sysStatus, health] = await Promise.all([
     api('/api/approvals/pending'),
     api('/api/system/status'),
     api('/api/health'),
   ]);
-  state.activeRuns = activeRuns || [];
   state.approvals = approvals || [];
   state.systemStatus = sysStatus || { status: 'offline', checks: {} };
   updateTopHeader(health);
@@ -711,17 +774,20 @@ function renderActiveRuns() {
         ${active.map(r => {
           const run = state.runsEnriched.find(x => x.run_id === r.run_id) || {};
           const stage = r.current_node || run.current_stage || 'ingest_task';
-          return `<button class="card text-left hover:border-teal-600/60" onclick="openRunDetail('${esc(r.run_id)}')">
-            <div class="flex items-center justify-between gap-2 mb-2">
-              <div class="mono text-xs text-teal-300">${esc(r.run_id)}</div>
-              ${statusChip('running')}
-            </div>
-            <div class="text-sm text-slate-200 line-clamp-2">${esc(r.task || run.task || '')}</div>
-            <div class="text-xs text-slate-500 mt-2">Started ${ago(r.started_at || run.created_at)}</div>
-            <div class="mt-2 flex items-center gap-1 flex-wrap">
-              ${PIPELINE.map(s => `<span class="chip ${s === stage ? 'chip-info' : 'chip-neutral'} mono">${esc(s.replaceAll('_',' '))}</span>`).join('')}
-            </div>
-          </button>`;
+          return `<div class="card hover:border-teal-600/60">
+            <button class="text-left w-full" onclick="openRunDetail('${esc(r.run_id)}')">
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <div class="mono text-xs text-teal-300">${esc(r.run_id)}</div>
+                ${statusChip('running')}
+              </div>
+              <div class="text-sm text-slate-200 line-clamp-2">${esc(r.task || run.task || '')}</div>
+              <div class="text-xs text-slate-500 mt-2">Started ${ago(r.started_at || run.created_at)}</div>
+              <div class="mt-2 flex items-center gap-1 flex-wrap">
+                ${PIPELINE.map(s => `<span class="chip ${s === stage ? 'chip-info' : 'chip-neutral'} mono">${esc(s.replaceAll('_',' '))}</span>`).join('')}
+              </div>
+            </button>
+            <button class="btn mt-3 w-full text-xs font-semibold bg-red-900/40 border-red-700/60 text-red-300 hover:bg-red-800/60" onclick="cancelRun('${esc(r.run_id)}')">Cancel Run</button>
+          </div>`;
         }).join('')}
       </div>` : '<div class="card text-sm text-slate-500">No active runs right now.</div>'}
     </div>`;
@@ -923,6 +989,19 @@ async function prefetchRunAnalysis() {
   await Promise.all(sample.map(r => ensureRunAnalysis(r.run_id)));
 }
 
+async function cancelRun(runId) {
+  const res = await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+  if (res && res.cancel_requested) {
+    toast('Cancellation requested', 'ok');
+    // Update local state immediately
+    const ar = state.activeRuns.find(r => r.run_id === runId);
+    if (ar) ar.status = 'cancelled';
+    renderCurrentView();
+  } else {
+    toast('Failed to cancel run', 'error');
+  }
+}
+
 async function rerun(runId) {
   const run = state.runs.find(r => r.run_id === runId) || state.runsEnriched.find(r => r.run_id === runId);
   if (!run) return toast('Run not found', 'error');
@@ -1001,37 +1080,51 @@ function parseRunEventSlices(allEvents) {
 
 function renderForensicEventCards(events, title, subtitle, limit = 200) {
   if (!events.length) return `<div class="card text-xs text-slate-500">No ${esc(title.toLowerCase())} found.</div>`;
-  return `<div class="card p-0 overflow-auto max-h-[36rem]">
-    <div class="px-3 py-2 border-b border-slate-700/60">
-      <div class="text-sm font-semibold">${esc(title)}</div>
-      <div class="text-xs text-slate-500">${esc(subtitle)}</div>
+  const uid = 'evlog-' + Math.random().toString(36).slice(2, 8);
+  return `<div class="card p-0">
+    <div class="px-3 py-2 border-b border-slate-700/60 flex items-center justify-between">
+      <div>
+        <div class="text-sm font-semibold">${esc(title)}</div>
+        <div class="text-xs text-slate-500">${esc(subtitle)} · ${events.length} events</div>
+      </div>
+      <label class="flex items-center gap-1 text-xs text-slate-400 cursor-pointer select-none">
+        <input type="checkbox" checked onchange="toggleAutoScroll('${uid}', this.checked)" class="accent-teal-500" /> Auto-scroll
+      </label>
     </div>
-    <div class="divide-y divide-slate-700/50">
+    <div id="${uid}" class="overflow-auto max-h-[36rem] divide-y divide-slate-700/30" data-autoscroll="true">
       ${events.slice(-limit).map(e => {
         const p = e.payload || {};
         const evName = e.event || 'event';
-        return `<details class="p-3">
-          <summary class="cursor-pointer">
-            <div class="flex items-center justify-between gap-2">
-              <span class="mono text-xs text-teal-300">${esc(evName)}</span>
-              <span class="text-xs text-slate-500">${esc(fmtTime(e.ts || e.created_at))}</span>
-            </div>
-          </summary>
-          <div class="mt-2 grid grid-cols-1 xl:grid-cols-2 gap-2 text-xs">
-            <pre class="bg-slate-900 rounded border border-slate-700/50 p-2 overflow-auto max-h-52">${esc(JSON.stringify(p, null, 2))}</pre>
-            <div class="bg-slate-900 rounded border border-slate-700/50 p-2">
-              <div class="text-slate-500 mb-1">Key fields</div>
-              <div class="space-y-1">
-                <div><span class="text-slate-500">run_id:</span> <span class="mono">${esc(e.run_id || '')}</span></div>
-                <div><span class="text-slate-500">agent_id:</span> <span class="mono">${esc(p.agent_id || e.agent_id || '')}</span></div>
-                <div><span class="text-slate-500">status:</span> ${statusChip(p.status || (p.ok === true ? 'ok' : p.ok === false ? 'error' : 'unknown'))}</div>
-              </div>
-            </div>
+        const st = p.status || (p.ok === true ? 'ok' : p.ok === false ? 'error' : '');
+        const agentId = p.agent_id || e.agent_id || '';
+        const summary = p.reason || p.error || p.result ? String(p.reason || p.error || (typeof p.result === 'string' ? p.result : '')).slice(0, 120) : '';
+        return `<div class="px-3 py-2 hover:bg-slate-800/40 text-xs group">
+          <div class="flex items-center gap-2">
+            <span class="mono text-teal-300 shrink-0">${esc(evName)}</span>
+            ${st ? statusChip(st) : ''}
+            ${agentId ? `<span class="mono text-slate-500 truncate max-w-[10rem]">${esc(agentId)}</span>` : ''}
+            <span class="ml-auto text-slate-500 shrink-0">${esc(fmtTime(e.ts || e.created_at))}</span>
           </div>
-        </details>`;
+          ${summary ? `<div class="mt-1 text-slate-400 truncate">${esc(summary)}</div>` : ''}
+          <pre class="mt-1 text-slate-500 whitespace-pre-wrap break-all max-h-0 overflow-hidden group-hover:max-h-52 transition-all duration-200">${esc(JSON.stringify(p, null, 2))}</pre>
+        </div>`;
       }).join('')}
     </div>
   </div>`;
+}
+
+function toggleAutoScroll(uid, on) {
+  const el = document.getElementById(uid);
+  if (el) {
+    el.dataset.autoscroll = on ? 'true' : 'false';
+    if (on) el.scrollTop = el.scrollHeight;
+  }
+}
+// After render, auto-scroll all log panels that have the flag
+function autoScrollLogPanels() {
+  document.querySelectorAll('[data-autoscroll="true"]').forEach(el => {
+    el.scrollTop = el.scrollHeight;
+  });
 }
 
 function renderRunDetail() {
@@ -1061,20 +1154,6 @@ function renderRunDetail() {
     model: 'from config',
     policy: 'default',
   };
-
-  // Extract skills used during this run from events
-  const skillsUsed = [];
-  const skillsSeen = new Set();
-  for (const ev of uniqueEvents) {
-    if (ev.event === 'skills_composed' && ev.payload?.skill_ids) {
-      for (const sid of ev.payload.skill_ids) {
-        if (!skillsSeen.has(sid)) { skillsSeen.add(sid); skillsUsed.push({ skill_id: sid, agent_id: ev.payload.agent_id || '' }); }
-      }
-    }
-    if (ev.event === 'agent_created' && ev.payload?.skill_md_preview) {
-      // Legacy: tag from skill_md_preview
-    }
-  }
 
   const stageTimeline = (analysis?.stages || []).map(s => {
     const bad = s.errors > 0;
@@ -1139,6 +1218,7 @@ function renderRunDetail() {
           <div class="text-xs ${state.runLogStreams[runId] ? 'text-teal-300' : 'text-slate-500'} mt-1">${state.runLogStreams[runId] ? 'Live stream connected' : 'Snapshot mode'}</div>
         </div>
         <div class="flex items-center gap-2">
+          ${summary.status === 'running' ? `<button class="btn text-xs font-semibold bg-red-900/40 border-red-700/60 text-red-300 hover:bg-red-800/60" onclick="cancelRun('${esc(runId || '')}')">Cancel Run</button>` : ''}
           <button class="btn btn-soft" onclick="rerun('${esc(runId || '')}')">Re-run</button>
           <button class="btn btn-soft" onclick="openNewRunModal('${esc((run?.task || '').replace(/'/g, "&#39;"))}')">Re-run with edits</button>
           <button class="btn btn-soft" onclick="downloadRunBundle('${esc(runId || '')}')">Download bundle</button>
@@ -1154,7 +1234,6 @@ function renderRunDetail() {
           <div><div class="text-slate-500">Agent</div><div class="mt-1 mono">${esc(summary.agent)}</div></div>
           <div><div class="text-slate-500">Model / policy</div><div class="mt-1">${esc(summary.model)} / ${esc(summary.policy)}</div></div>
         </div>
-        ${skillsUsed.length ? `<div class="mt-2 flex items-center gap-2 flex-wrap"><span class="text-xs text-slate-500">Skills:</span>${skillsUsed.map(s => `<span class="chip chip-info mono text-xs cursor-pointer" onclick="openSkillDetail('${esc(s.skill_id)}')">${esc(s.skill_id)}</span>`).join('')}</div>` : ''}
         ${summary.failure
           ? `<div class="mt-3 rounded border border-red-700/40 bg-red-900/10 p-3">
               <div class="flex items-center gap-2 mb-2"><span class="text-red-400 text-sm font-bold">⚠ Root Cause Analysis</span></div>
@@ -1492,6 +1571,122 @@ async function testTool(name) {
   toast(`${name}: ${res.message || 'ok'}`, 'ok');
 }
 
+// ── Skills views ──────────────────────────────────────────────
+
+function renderSkills() {
+  const skills = state.skills || [];
+  $('view-skills').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Skill Library</h1>
+        <p class="text-sm text-slate-400 mt-1">Base skill modules shared across agents (Layer 1 system prompts).</p>
+      </div>
+      ${skills.length ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        ${skills.map(s => `<button class="card text-left hover:border-teal-600/60" onclick="openSkillDetail('${esc(s.skill_id)}')">
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <span class="mono text-sm text-teal-300">${esc(s.skill_id)}</span>
+            <span class="chip chip-neutral text-xs">${s.agent_count} agent${s.agent_count !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="text-sm text-slate-200">${esc(s.label)}</div>
+          <div class="text-xs text-slate-500 mt-2">${esc(s.content_length)} chars</div>
+          <div class="text-xs text-slate-600 mt-1 line-clamp-3">${esc(s.content_preview || '')}</div>
+        </button>`).join('')}
+      </div>` : '<div class="card text-sm text-slate-500">No skill modules found. Create .md files in agents/skills/.</div>'}
+    </div>`;
+}
+
+async function openSkillDetail(skillId) {
+  state.skillDetail = await api(`/api/skills/${encodeURIComponent(skillId)}`);
+  state.view = 'skill-detail';
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  $('view-skill-detail').classList.add('active');
+  renderNav();
+  renderSkillDetail();
+}
+
+function renderSkillDetail() {
+  const sk = state.skillDetail;
+  if (!sk) {
+    $('view-skill-detail').innerHTML = '<div class="card text-sm text-slate-500">Loading...</div>';
+    return;
+  }
+  const agents = sk.using_agents || [];
+  $('view-skill-detail').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <button class="btn btn-ghost mb-2" onclick="setView('skills')">← Back to Skills</button>
+        <h1 class="text-2xl font-bold">${esc(sk.label || sk.skill_id)}</h1>
+        <div class="mono text-xs text-slate-500 mt-1">${esc(sk.skill_id)}.md</div>
+      </div>
+      ${agents.length ? `<div class="card">
+        <div class="text-xs text-slate-500 mb-2">Used by ${agents.length} agent${agents.length !== 1 ? 's' : ''}</div>
+        <div class="flex flex-wrap gap-2">
+          ${agents.map(a => `<button class="chip chip-info mono text-xs" onclick="openAgentDetail('${esc(a.agent_id)}')">${esc(a.name || a.agent_id)}</button>`).join('')}
+        </div>
+      </div>` : '<div class="card text-xs text-slate-500">Not used by any agents yet.</div>'}
+      <div class="card">
+        <div class="text-xs text-slate-500 mb-2">Full content</div>
+        <pre class="text-xs bg-slate-900 rounded-lg border border-slate-700/50 p-3 max-h-[50rem] overflow-auto whitespace-pre-wrap">${esc(sk.content || '')}</pre>
+      </div>
+    </div>`;
+}
+
+// ── Settings view ─────────────────────────────────────────────
+
+function renderSettingsPage() {
+  const catalog = state.settingsCatalog || [];
+  $('view-settings').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-bold">Settings</h1>
+          <p class="text-sm text-slate-400 mt-1">All CLOSED_CLAW_* environment variables. Changes write to .env and take effect immediately.</p>
+        </div>
+        <button class="btn btn-primary" onclick="saveSettings()">Save Changes</button>
+      </div>
+      <div class="card p-0 overflow-auto max-h-[70vh]">
+        <table class="w-full">
+          <thead><tr>
+            <th class="table-head">Setting</th>
+            <th class="table-head">Env Var</th>
+            <th class="table-head">Value</th>
+            <th class="table-head">Default</th>
+          </tr></thead>
+          <tbody>
+            ${catalog.map((s, i) => `<tr class="table-row">
+              <td class="table-cell">
+                <div class="text-sm">${esc(s.label || s.env)}</div>
+                ${s.description ? `<div class="text-xs text-slate-500 mt-0.5">${esc(s.description)}</div>` : ''}
+              </td>
+              <td class="table-cell mono text-xs">${esc(s.env)}</td>
+              <td class="table-cell"><input data-env="${esc(s.env)}" class="settings-input bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm w-full max-w-xs" value="${esc(s.value ?? s.default ?? '')}" /></td>
+              <td class="table-cell text-xs text-slate-500">${esc(s.default ?? '–')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function saveSettings() {
+  const inputs = document.querySelectorAll('.settings-input');
+  const changes = {};
+  inputs.forEach(inp => {
+    const env = inp.dataset.env;
+    if (env) changes[env] = inp.value;
+  });
+  const res = await api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ changes }),
+  });
+  if (res && res.saved) {
+    toast(`Saved ${res.saved} setting${res.saved > 1 ? 's' : ''}`, 'ok');
+  } else {
+    toast('Failed to save settings', 'error');
+  }
+}
+
 function renderHealth() {
   const s = state.systemStatus;
   $('view-health').innerHTML = `
@@ -1512,218 +1707,6 @@ function renderHealth() {
     </div>`;
 }
 
-/* ────────────────────────── Skills page ────────────────────────── */
-function renderSkills() {
-  const skills = state.skills || [];
-  $('view-skills').innerHTML = `
-    <div class="space-y-4">
-      <div>
-        <h1 class="text-2xl font-bold">Skills Library</h1>
-        <p class="text-sm text-slate-400 mt-1">Shared base skill modules used to compose agent system prompts.</p>
-      </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        ${skills.map(s => `<div class="card cursor-pointer hover:border-teal-500/50 transition" onclick="openSkillDetail('${esc(s.skill_id)}')">
-          <div class="flex items-center justify-between gap-2 mb-2">
-            <div class="mono text-sm text-teal-300">${esc(s.skill_id)}</div>
-            <span class="chip chip-info text-xs">${s.agent_count} agent${s.agent_count !== 1 ? 's' : ''}</span>
-          </div>
-          <div class="text-xs text-slate-300 font-medium mb-1">${esc(s.label)}</div>
-          <div class="text-xs text-slate-500">${esc((s.content_preview || '').slice(0, 200))}${s.content_length > 200 ? '…' : ''}</div>
-        </div>`).join('') || '<div class="card text-sm text-slate-500">No skill modules found in agents/skills/.</div>'}
-      </div>
-    </div>`;
-}
-
-async function openSkillDetail(skillId) {
-  state.selectedSkillId = skillId;
-  const d = await api('/api/skills/' + encodeURIComponent(skillId));
-  state.skillDetail = d;
-  setView('skill-detail');
-}
-
-function renderSkillDetail() {
-  const s = state.skillDetail;
-  if (!s) {
-    $('view-skill-detail').innerHTML = '<div class="text-sm text-slate-500">Skill not found.</div>';
-    return;
-  }
-  $('view-skill-detail').innerHTML = `
-    <div class="space-y-4">
-      <div>
-        <button class="btn btn-ghost mb-2" onclick="setView('skills')">← Back to Skills</button>
-        <h1 class="text-2xl font-bold">${esc(s.label || s.skill_id)}</h1>
-        <div class="mono text-xs text-slate-500 mt-1">${esc(s.skill_id)}.md</div>
-      </div>
-      <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
-        <div class="card xl:col-span-2">
-          <div class="font-semibold mb-2">Skill Content</div>
-          <pre class="text-xs text-slate-300 overflow-auto max-h-[60vh] whitespace-pre-wrap mono bg-slate-900 p-3 rounded-lg border border-slate-700/50">${esc(s.content || '')}</pre>
-        </div>
-        <div class="card">
-          <div class="font-semibold mb-2">Used by Agents (${(s.using_agents || []).length})</div>
-          <div class="space-y-1 text-xs">
-            ${(s.using_agents || []).length ? (s.using_agents || []).map(a => `<div class="border-b border-slate-700/50 pb-1">
-              <button class="text-teal-300 hover:underline" onclick="openAgentDetail('${esc(a.agent_id)}')">${esc(a.name || a.agent_id)}</button>
-              <div class="mono text-slate-500">${esc(a.agent_id)}</div>
-            </div>`).join('') : '<span class="text-slate-500">No agents use this skill yet.</span>'}
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-/* ────────────────────────── Settings page ────────────────────────── */
-async function renderSettingsPage() {
-  if (!state.settingsCatalog || !state.settingsCatalog.length) {
-    state.settingsCatalog = await api('/api/settings') || [];
-  }
-  const catalog = state.settingsCatalog || [];
-  const groups = {};
-  for (const s of catalog) {
-    const g = s.group || 'Other';
-    if (!groups[g]) groups[g] = [];
-    groups[g].push(s);
-  }
-
-  // Find the extra_allowed_paths entry for the dedicated safe-paths card
-  const safePaths = catalog.find(s => s.key === 'extra_allowed_paths');
-  const currentPaths = (safePaths?.value || '').split(',').map(p => p.trim()).filter(Boolean);
-
-  $('view-settings').innerHTML = `
-    <div class="space-y-4">
-      <div>
-        <h1 class="text-2xl font-bold">Settings</h1>
-        <p class="text-sm text-slate-400 mt-1">Runtime configuration — changes saved to .env and reloaded immediately.</p>
-      </div>
-
-      <!-- Dedicated Safe Paths management card -->
-      <div class="card border-teal-500/30" id="safe-paths-card">
-        <div class="font-semibold mb-1 text-teal-300">Safe Paths (file_io allowed directories)</div>
-        <p class="text-xs text-slate-400 mb-3">Add directories the <code class="mono">file_io</code> tool can read/write outside the workspace. These are <strong>extra_allowed_paths</strong> in the config.</p>
-        <div class="space-y-2 mb-3" id="safe-paths-list">
-          ${currentPaths.length ? currentPaths.map((p, i) => `
-            <div class="flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-2 border border-slate-700/50">
-              <span class="flex-1 mono text-sm text-slate-200 truncate" title="${esc(p)}">${esc(p)}</span>
-              <button class="btn btn-ghost text-red-400 text-xs px-2 py-1" onclick="removeSafePath(${i})">Remove</button>
-            </div>
-          `).join('') : '<div class="text-xs text-slate-500">No extra safe paths configured. Only the workspace root is accessible.</div>'}
-        </div>
-        <div class="flex gap-2">
-          <input id="new-safe-path" type="text" class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="C:\\Users\\yourname\\Documents\\data" />
-          <button class="btn btn-primary" onclick="addSafePath()">Add Path</button>
-        </div>
-      </div>
-
-      <!-- Grouped settings -->
-      ${Object.entries(groups).map(([group, items]) => `
-        <div class="card">
-          <div class="font-semibold mb-3">${esc(group)}</div>
-          <div class="space-y-3">
-            ${items.filter(s => s.key !== 'extra_allowed_paths').map(s => {
-              if (s.type === 'select') {
-                return `<div>
-                  <label class="text-xs text-slate-400">${esc(s.label)}</label>
-                  <div class="text-xs text-slate-600 mb-1">${esc(s.description || '')}</div>
-                  <select data-env="${esc(s.env)}" class="settings-input bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm w-full">
-                    ${(s.options || []).map(o => `<option value="${esc(o)}" ${String(s.value) === String(o) ? 'selected' : ''}>${esc(o)}</option>`).join('')}
-                  </select>
-                </div>`;
-              }
-              if (s.type === 'bool') {
-                return `<div class="flex items-center gap-3">
-                  <input type="checkbox" data-env="${esc(s.env)}" class="settings-input" ${s.value ? 'checked' : ''} />
-                  <div>
-                    <div class="text-xs text-slate-300">${esc(s.label)}</div>
-                    <div class="text-xs text-slate-600">${esc(s.description || '')}</div>
-                  </div>
-                </div>`;
-              }
-              return `<div>
-                <label class="text-xs text-slate-400">${esc(s.label)}</label>
-                <div class="text-xs text-slate-600 mb-1">${esc(s.description || '')}</div>
-                <input type="${s.type === 'number' ? 'number' : 'text'}" data-env="${esc(s.env)}" class="settings-input bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm w-full" value="${esc(s.value ?? '')}" />
-              </div>`;
-            }).join('')}
-          </div>
-        </div>
-      `).join('')}
-
-      <div class="flex gap-2">
-        <button class="btn btn-primary" onclick="saveAllSettings()">Save All Settings</button>
-        <span id="settings-status" class="text-xs text-slate-400 self-center"></span>
-      </div>
-    </div>`;
-}
-
-async function addSafePath() {
-  const input = $('new-safe-path');
-  const newPath = (input?.value || '').trim();
-  if (!newPath) return toast('Enter a directory path', 'error');
-  const safePaths = (state.settingsCatalog || []).find(s => s.key === 'extra_allowed_paths');
-  const current = (safePaths?.value || '').split(',').map(p => p.trim()).filter(Boolean);
-  if (current.includes(newPath)) return toast('Path already added', 'error');
-  current.push(newPath);
-  const newVal = current.join(',');
-  const res = await api('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ changes: { CLOSED_CLAW_EXTRA_ALLOWED_PATHS: newVal } }),
-  });
-  if (res && res.saved) {
-    toast('Safe path added — active after next run', 'ok');
-    state.settingsCatalog = await api('/api/settings') || [];
-    renderSettingsPage();
-  } else {
-    toast('Failed to save', 'error');
-  }
-}
-
-async function removeSafePath(index) {
-  const safePaths = (state.settingsCatalog || []).find(s => s.key === 'extra_allowed_paths');
-  const current = (safePaths?.value || '').split(',').map(p => p.trim()).filter(Boolean);
-  current.splice(index, 1);
-  const newVal = current.join(',');
-  const res = await api('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ changes: { CLOSED_CLAW_EXTRA_ALLOWED_PATHS: newVal } }),
-  });
-  if (res && res.saved) {
-    toast('Safe path removed', 'ok');
-    state.settingsCatalog = await api('/api/settings') || [];
-    renderSettingsPage();
-  } else {
-    toast('Failed to save', 'error');
-  }
-}
-
-async function saveAllSettings() {
-  const changes = {};
-  document.querySelectorAll('.settings-input').forEach(el => {
-    const env = el.dataset.env;
-    if (!env) return;
-    if (el.type === 'checkbox') changes[env] = el.checked ? 'true' : 'false';
-    else changes[env] = el.value;
-  });
-  if (!Object.keys(changes).length) return toast('No changes', 'error');
-  const status = $('settings-status');
-  status.textContent = 'Saving…';
-  const res = await api('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ changes }),
-  });
-  if (res && res.saved) {
-    status.textContent = `Saved ${res.saved} setting(s)`;
-    toast(`Saved ${res.saved} setting(s)`, 'ok');
-    state.settingsCatalog = await api('/api/settings') || [];
-    renderSettingsPage();
-  } else {
-    status.textContent = 'Save failed';
-    toast('Failed to save settings', 'error');
-  }
-}
-
 function renderCurrentView() {
   if (state.view === 'overview') renderOverview();
   if (state.view === 'active-runs') renderActiveRuns();
@@ -1738,6 +1721,8 @@ function renderCurrentView() {
   if (state.view === 'skill-detail') renderSkillDetail();
   if (state.view === 'settings') renderSettingsPage();
   if (state.view === 'health') renderHealth();
+  // Auto-scroll any log panels that are pinned to bottom
+  requestAnimationFrame(autoScrollLogPanels);
 }
 
 function renderSearchIndex() {
@@ -1861,28 +1846,16 @@ async function boot() {
     state.view = 'run-detail';
   }
 
+  // Initial full load (one refreshAll covers everything including active runs)
   await refreshAll();
   await prefetchRunAnalysis();
   renderCurrentView();
   renderApprovalsBadge();
 
-  // Adaptive polling — fast when runs are active, slow when idle
-  let currentInterval = 0;
-  async function pollTick() {
-    await refreshCore();
-    await refreshView();
-    if (state.view === 'run-detail' && state.selectedRunDetailId) await ensureRunAnalysis(state.selectedRunDetailId);
-
-    const hasActive = state.activeRuns.some(r => String(r.status) === 'running');
-    const desired = hasActive ? POLL_ACTIVE_MS : POLL_IDLE_MS;
-    if (desired !== currentInterval) {
-      currentInterval = desired;
-      clearInterval(state.refreshTimer);
-      state.refreshTimer = setInterval(pollTick, currentInterval);
-    }
-  }
-  currentInterval = POLL_IDLE_MS;
-  state.refreshTimer = setInterval(pollTick, currentInterval);
+  // Connect SSE for real-time push updates (active runs, approvals).
+  // If SSE connects successfully, no polling needed.
+  // If SSE fails or is unavailable, _startFallbackPoll() activates automatically.
+  connectGlobalSSE();
 }
 
 document.addEventListener('DOMContentLoaded', boot);

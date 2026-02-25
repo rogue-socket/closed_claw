@@ -246,6 +246,13 @@ def generate_agent_profile(
         "- tags should include 'auto' and 'capability'.\n"
         "- skill_md must be a detailed markdown role guide (identity, decision rules, output format).\n"
         "- skill_ids must be a subset of available base skill modules that apply to this agent.\n"
+        "- ROLE BOUNDARY: skill_md MUST include a 'Scope Constraints' section that "
+        "explicitly states what the agent is allowed to do and what it must NOT do. "
+        "For example, a reader agent must NOT write or modify files; a validator must NOT "
+        "implement solutions. Only grant file_io write access in tools_allowlist when the "
+        "agent's role genuinely requires creating or modifying files.\n"
+        "- tools_allowlist must be the MINIMUM set of tools needed for the role. "
+        "Do not grant tools the agent does not need.\n"
         f"Task: {task.strip()}"
     )
     try:
@@ -521,10 +528,15 @@ def _task_plan_prompt(task: str, phase: str, discovery_results: dict[str, str]) 
         "{\"subtasks\":[{\"task_id\":str,\"title\":str,\"description\":str,\"role_tag\":str,"
         "\"depends_on\":[str],\"acceptance_criteria\":[str],\"requires_tool\":bool}]}\n"
         "Rules:\n"
-        "- Decompose into atomic tasks.\n"
+        "- Use the FEWEST subtasks possible. Most tasks need 1-3 subtasks, NEVER more than 4.\n"
+        "- Do NOT split work that a single agent can handle in one step. "
+        "For example, 'read a file and write code' is ONE subtask, not three.\n"
+        "- Merge closely related actions (read + parse, implement + save) into one subtask.\n"
         "- Prefer independent tasks; only include dependencies when unavoidable.\n"
         "- role_tag should be reusable capability labels (not person names).\n"
         "- each acceptance_criteria entry must be verifiable.\n"
+        "- Each subtask description MUST include a SCOPE CONSTRAINT stating what "
+        "the agent must NOT do (e.g., 'Do NOT write files' for a reader role).\n"
     )
     if phase == "discovery":
         return (

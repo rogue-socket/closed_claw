@@ -24,6 +24,7 @@ class AgentManifest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     api_capabilities: list[str] = Field(default_factory=list)
     requires_approval_for: list[str] = Field(default_factory=list)
+    skill_ids: list[str] = Field(default_factory=list)  # base skill module IDs from agents/skills/
     version: str = "1.5"
     created_at: str
     last_used_at: str | None = None
@@ -111,6 +112,13 @@ class RegistryStore:
             )
         with self._conn() as conn:
             conn.executescript(schema)
+            # Migration: add skill_ids_json column if missing (added after v1.5)
+            try:
+                conn.execute(
+                    "ALTER TABLE agents ADD COLUMN skill_ids_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     @staticmethod
     def _has_agent_vectors_table(conn: sqlite3.Connection) -> bool:
@@ -128,9 +136,9 @@ class RegistryStore:
                 INSERT INTO agents (
                     agent_id, name, description, embedding_model, embedding_dim,
                     embedding_json, tools_allowlist_json, tags_json, api_capabilities_json,
-                    requires_approval_for_json, version, created_at, last_used_at,
+                    requires_approval_for_json, skill_ids_json, version, created_at, last_used_at,
                     usage_count, success_count, failure_count, success_rate, avg_latency_ms, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
@@ -141,6 +149,7 @@ class RegistryStore:
                     tags_json=excluded.tags_json,
                     api_capabilities_json=excluded.api_capabilities_json,
                     requires_approval_for_json=excluded.requires_approval_for_json,
+                    skill_ids_json=excluded.skill_ids_json,
                     version=excluded.version,
                     last_used_at=excluded.last_used_at,
                     usage_count=excluded.usage_count,
@@ -161,6 +170,7 @@ class RegistryStore:
                     json.dumps(manifest.tags),
                     json.dumps(manifest.api_capabilities),
                     json.dumps(manifest.requires_approval_for),
+                    json.dumps(manifest.skill_ids),
                     manifest.version,
                     manifest.created_at,
                     manifest.last_used_at,
@@ -186,6 +196,8 @@ class RegistryStore:
             row = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
             if row is None:
                 return None
+            # skill_ids_json may not exist in older databases
+            skill_ids_raw = row["skill_ids_json"] if "skill_ids_json" in row.keys() else "[]"
             return AgentManifest(
                 agent_id=row["agent_id"],
                 name=row["name"],
@@ -196,6 +208,7 @@ class RegistryStore:
                 tags=json.loads(row["tags_json"]),
                 api_capabilities=json.loads(row["api_capabilities_json"]),
                 requires_approval_for=json.loads(row["requires_approval_for_json"]),
+                skill_ids=json.loads(skill_ids_raw or "[]"),
                 version=row["version"],
                 created_at=row["created_at"],
                 last_used_at=row["last_used_at"],

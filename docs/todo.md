@@ -10,5 +10,4 @@
 - Create a way to add tools, customise them
 - Add description for tools so that the coordinator llm knows how to pick them efficiently
 - Replace in-run supervisor task-pool loop with a proper background job system (durable task pool + persistent role-tag workers polling every 30s, lease/heartbeat/retry semantics, dependency resolver, and CLI `runs watch` live checklist that survives CLI exit)
-- Add functionality for models
-- Create UI
+- Add way for the agents to communicate + launch queues/task pools for other agents to pick up

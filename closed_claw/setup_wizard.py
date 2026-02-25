@@ -20,9 +20,7 @@ def run_setup_wizard(env_path: Path | None = None) -> SetupResult:
     env_path = env_path or Path(".env")
     provider = _choose_provider()
     model = _choose_model(provider)
-    key = ""
-    if provider != "heuristic":
-        key = input("Enter API key: ").strip()
+    key = input("Enter API key: ").strip()
 
     updates: dict[str, str] = {
         "CLOSED_CLAW_LLM_PROVIDER": provider,
@@ -53,8 +51,6 @@ def run_setup_wizard(env_path: Path | None = None) -> SetupResult:
 def verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]:
     """Run verify provider."""
     provider = provider.lower()
-    if provider == "heuristic":
-        return True, "heuristic reranker requires no API key"
     if not api_key:
         return False, "missing API key"
 
@@ -162,7 +158,7 @@ def _verify_siemens(model: str, api_key: str) -> tuple[bool, str]:
 
 def _choose_provider() -> str:
     """Run choose provider."""
-    options = ["heuristic", "openai", "gemini", "claude", "siemens"]
+    options = ["openai", "gemini", "claude", "siemens"]
     print("Choose LLM provider:")
     for idx, item in enumerate(options, start=1):
         print(f"  {idx}. {item}")
@@ -176,13 +172,12 @@ def _choose_provider() -> str:
 def _choose_model(provider: str) -> str:
     """Run choose model."""
     default_models = {
-        "heuristic": "local-heuristic",
         "openai": "gpt-4o-mini",
-        "gemini": "gemini-1.5-flash",
+        "gemini": "gemini-2.5-flash",
         "claude": "claude-3-5-haiku-latest",
         "siemens": "qwen3-30b-a3b-instruct-2507",
     }
-    default = default_models.get(provider, "local-heuristic")
+    default = default_models.get(provider, "gpt-4o-mini")
     raw = input(f"Model [{default}]: ").strip()
     return raw or default
 

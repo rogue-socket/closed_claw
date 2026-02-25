@@ -371,12 +371,13 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "openai": "OPENAI_API_KEY",
         "gemini": "GEMINI_API_KEY",
         "claude": "ANTHROPIC_API_KEY",
-        "heuristic": "(not required)",
+        "siemens": "SIEMENS_API_KEY",
     }.get(settings.llm_provider, "CLOSED_CLAW_LLM_API_KEY")
     provider_key = {
         "openai": settings.openai_api_key,
         "gemini": settings.gemini_api_key,
         "claude": settings.anthropic_api_key,
+        "siemens": settings.siemens_api_key,
     }.get(settings.llm_provider, settings.llm_api_key)
     llm_key_configured = bool(provider_key or settings.llm_api_key)
     checks: dict[str, Any] = {
@@ -461,7 +462,7 @@ def _migrate_legacy_agents(settings: Settings) -> None:
 
         if entrypoint_path.exists():
             current = entrypoint_path.read_text(encoding="utf-8")
-            if "organize_by_type" in current or "CLOSED_CLAW_ENTRYPOINT_VERSION=9" not in current:
+            if "organize_by_type" in current or "CLOSED_CLAW_ENTRYPOINT_VERSION=13" not in current:
                 entrypoint_path.write_text(ENTRYPOINT_TEMPLATE, encoding="utf-8")
                 local_changed = True
 
@@ -568,7 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--context-json", type=str, default=None)
     p_run.add_argument("--create-approval-mode", type=str, choices=["interactive", "approve", "deny"], default=None)
     p_run.add_argument("--api-approval-mode", type=str, choices=["interactive", "approve", "deny"], default=None)
-    p_run.add_argument("--llm-provider", type=str, choices=["heuristic", "openai", "gemini", "claude"], default=None)
+    p_run.add_argument("--llm-provider", type=str, choices=["openai", "gemini", "claude", "siemens"], default=None)
     p_run.add_argument("--llm-model", type=str, default=None)
     p_run.add_argument("--organize-path", type=str, default=None, help="Explicit folder path for organize tasks.")
     p_run.add_argument("--organize-dry-run", action="store_true", help="Preview organize task without moving files.")

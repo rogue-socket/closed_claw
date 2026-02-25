@@ -65,20 +65,58 @@ State flows as an immutable-merge dict (`CoordinatorState`) through every node. 
 ### Directory Structure
 
 ```
-agents/<agent_id>/
-  manifest.json   # AgentManifest — identity, metrics, tools_allowlist, tags, embedding
-  skill.md        # Role definition — injected as system prompt into the agent
-  memory.db       # SQLite episodic memory (key/value; agent-writable)
-  entrypoint.py   # Subprocess entry; speaks JSON-line protocol
-  logs/           # Per-run output artifacts
+agents/
+  skills/                 # Shared base skill library (Layer 1 of system prompt composition)
+    terminal.md           # Shell execution patterns
+    python_scripting.md   # Python code / data-processing patterns
+    git.md                # Git workflow patterns
+    file_system.md        # file_io tool patterns
+    web_http.md           # http_api / web_fetch patterns
+    sql_databases.md      # sql_query patterns
+    data_analysis.md      # data ingestion → transform → report patterns
+
+  <agent_id>/
+    manifest.json   # AgentManifest — identity, metrics, tools_allowlist, tags, skill_ids, embedding
+    skill.md        # Role overlay — agent-specific identity + decision rules (Layer 2)
+    memory.db       # SQLite episodic memory (key/value; agent-writable)
+    entrypoint.py   # Subprocess entry; speaks JSON-line protocol (v12)
+    logs/           # Per-run output artifacts
 ```
 
 ### Lifecycle
 
-1. **Creation:** `CoordinatorNodes._create_agent` calls `AgentFactory.create`, which writes the capsule directory. `generate_agent_profile` (via LLM or heuristic) produces `skill.md` and `tools_allowlist`.
+1. **Creation:** `CoordinatorNodes._acquire_agent_for_role` calls `AgentFactory.create_capsule()`, which writes the capsule directory. `generate_agent_profile` (via LLM or heuristic) produces `skill.md`, `tools_allowlist`, and `skill_ids` — a list of base skill module IDs the agent should inherit.
 2. **Reuse:** If a registered agent's embedding is above `low_confidence_threshold` for the current task, it is reused directly.
-3. **Execution:** `AgentRunner.run(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop.
-4. **Metrics:** After each run, `RegistryStore.update_agent_metrics` updates `usage_count`, `success_rate`, `avg_latency_ms`.
+3. **System prompt composition:** Before each run, `CoordinatorNodes._compose_system_prompt()` loads all `agents/skills/<id>.md` files listed in `manifest.skill_ids` (Layer 1) then appends `agents/<agent_id>/skill.md` (Layer 2). The result is passed as `config["system_prompt"]` in the `CoordinatorRequest`.
+4. **Execution:** `AgentRunner.run(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop. The v12 entrypoint reads `config["system_prompt"]` and injects it as the system role message in every LLM call.
+5. **Metrics:** After each run, `RegistryStore.update_agent_metrics` updates `usage_count`, `success_rate`, `avg_latency_ms`.
+
+---
+
+## Skill Composition System
+
+Every agent's LLM identity is a **two-layer composed system prompt** built by `CoordinatorNodes._compose_system_prompt()` at run time:
+
+```
+Layer 1 — Base skill modules (agents/skills/<skill_id>.md)
+          Modular, reusable capability knowledge.
+          One file per tool domain: terminal, git, file_system, http, etc.
+          Each agent manifest carries a skill_ids list; only listed modules are included.
+
+                      [ terminal.md ]  [ git.md ]  [ python_scripting.md ] ...
+                             ↓              ↓                ↓
+                        concatenated in manifest skill_ids order
+
+Layer 2 — Role overlay (agents/<agent_id>/skill.md)
+          Agent-specific identity, high-level decision rules, output format.
+          Appended after Layer 1.
+```
+
+The resulting string is injected as:
+- `config["system_prompt"]` in `CoordinatorRequest` (passed to the subprocess)
+- The system/role message prepended to every LLM call inside the v12 entrypoint
+
+**Adding a new base skill:** Create `agents/skills/<name>.md` and add the module name to `_BASE_SKILL_IDS` in `registry/search.py`. The LLM will then be able to assign it to new agents via `generate_agent_profile`.
 
 ---
 
@@ -110,7 +148,7 @@ Coordinator                         Agent
 
 | Type | Direction | Key fields |
 |------|-----------|-----------|
-| `CoordinatorRequest` | → Agent | `session_id`, `task`, `context`, `artifacts`, `config` |
+| `CoordinatorRequest` | → Agent | `session_id`, `task`, `context`, `artifacts`, `config` (`llm`, `system_prompt`, `tool_registry`) |
 | `ToolCallIntent` | ← Agent | `tool`, `args`, `reason` |
 | `ToolCallResult` | → Agent | `ok`, `result`, `error` |
 | `ApiCallIntent` | ← Agent | `provider`, `endpoint`, `estimated_cost_usd`, `reason` |
@@ -252,15 +290,16 @@ The task pool is **not durable** — if the CLI process exits mid-run, the task 
 
 | What to extend | Where |
 |----------------|-------|
-| Add a real LLM provider client | `registry/search.py` (reranker) + `coordinator/nodes.py` (`_handle_api_call_intent`) |
+| Add a real LLM provider client | `registry/search.py` (reranker) + `coordinator/nodes.py` (`_handle_api_call_intent`) + entrypoint template `_execute_llm_http` |
 | Add a new tool | `tools/executor.py` — `SUPPORTED_TOOLS`, `TOOL_REGISTRY`, `ToolExecutor` |
-| Change agent capsule template | `closed_claw/agents/factory.py` — `ENTRYPOINT_TEMPLATE` |
+| Change agent capsule template | `closed_claw/agents/factory.py` — `ENTRYPOINT_TEMPLATE` (bump version constant) |
 | Add a coordinator node | `coordinator/nodes.py` + `coordinator/graph.py` |
 | Add a CLI command | `cli.py` — `cmd_<name>` + `_build_parser` |
 | Change approval logic | `policy/approval.py` |
 | Change routing algorithm | `registry/search.py` — implement `RerankerProtocol` |
 | Add DB columns | `registry/schema.sql` + `registry/store.py` + `registry/store.AgentManifest` |
 | Add a web API endpoint | `web/server.py` |
+| **Add a base skill module** | **`agents/skills/<name>.md` + add to `_BASE_SKILL_IDS` in `registry/search.py`** |
 
 ---
 
@@ -286,11 +325,19 @@ The `setup` wizard prompts for provider → model → API key → runs a live ve
 
 agents/                   # agent capsule store
   registry.json           # human-readable agent list
+  skills/                 # shared base skill library
+    terminal.md
+    python_scripting.md
+    git.md
+    file_system.md
+    web_http.md
+    sql_databases.md
+    data_analysis.md
   <agent_id>/
-    manifest.json
-    skill.md
+    manifest.json         # includes skill_ids list
+    skill.md              # role overlay (Layer 2)
     memory.db
-    entrypoint.py
+    entrypoint.py         # v12
     logs/
 ```
 

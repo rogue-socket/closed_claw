@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import concurrent.futures
+import threading
+import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from closed_claw.compat import BaseModel
 
@@ -32,6 +35,48 @@ class ApprovalDecision(BaseModel):
     note: str = ""
 
 
+# ---------------------------------------------------------------------------
+#  Web-mode pending approval queue (shared across all runs in one process)
+# ---------------------------------------------------------------------------
+_pending_lock = threading.Lock()
+_pending_approvals: dict[str, dict[str, Any]] = {}
+# Maps approval_id → {"request_data": {...}, "run_id": str, "event": Event, "decision": None|ApprovalDecision}
+
+
+def get_pending_approvals(run_id: str | None = None) -> list[dict[str, Any]]:
+    """Return pending web-mode approval requests, optionally filtered by run_id."""
+    with _pending_lock:
+        items = []
+        for aid, entry in _pending_approvals.items():
+            if entry.get("decision") is not None:
+                continue  # already resolved
+            if run_id and entry.get("run_id") != run_id:
+                continue
+            items.append({
+                "approval_id": aid,
+                "run_id": entry["run_id"],
+                "request_data": entry["request_data"],
+                "created_at": entry.get("created_at", ""),
+            })
+        return items
+
+
+def resolve_approval(approval_id: str, approved: bool, note: str = "") -> bool:
+    """Resolve a pending web approval.  Returns True if found & resolved."""
+    with _pending_lock:
+        entry = _pending_approvals.get(approval_id)
+        if entry is None or entry.get("decision") is not None:
+            return False
+        entry["decision"] = ApprovalDecision(
+            approved=approved,
+            operator="web_user",
+            timestamp=datetime.now(UTC).isoformat(),
+            note=note or ("approved_via_web" if approved else "denied_via_web"),
+        )
+        entry["event"].set()
+        return True
+
+
 class ApprovalGate:
     def __init__(self, timeout_sec: int = 30, console: Console | None = None) -> None:
         """Initialize the instance."""
@@ -42,6 +87,43 @@ class ApprovalGate:
         """Run read."""
         return input(prompt)
 
+    # ------------------------------------------------------------------ web
+    def _web_prompt(
+        self,
+        request_data: dict[str, Any],
+        run_id: str,
+        timeout: int | None = None,
+    ) -> ApprovalDecision:
+        """Publish an approval request and block until the web UI resolves it."""
+        approval_id = uuid.uuid4().hex
+        event = threading.Event()
+        entry: dict[str, Any] = {
+            "run_id": run_id,
+            "request_data": request_data,
+            "event": event,
+            "decision": None,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        with _pending_lock:
+            _pending_approvals[approval_id] = entry
+
+        wait_sec = timeout if timeout is not None else self.timeout_sec
+        resolved = event.wait(timeout=wait_sec)
+
+        with _pending_lock:
+            result = _pending_approvals.pop(approval_id, entry)
+
+        if resolved and result.get("decision") is not None:
+            return result["decision"]  # type: ignore[return-value]
+
+        return ApprovalDecision(
+            approved=False,
+            operator="web_timeout",
+            timestamp=datetime.now(UTC).isoformat(),
+            note="timed_out_default_deny",
+        )
+
+    # -------------------------------------------------------------- console
     def prompt(self, req: ApprovalRequest, operator: str = "human") -> ApprovalDecision:
         """Run prompt."""
         self.console.print("\n[bold yellow]Approval required for external paid API call[/bold yellow]")
@@ -96,6 +178,18 @@ class ApprovalGate:
                 timestamp=datetime.now(UTC).isoformat(),
                 note="auto_denied_by_policy",
             )
+        if normalized == "web":
+            return self._web_prompt(
+                request_data={
+                    "type": "api_call",
+                    "call_type": req.call_type,
+                    "provider": req.provider,
+                    "endpoint": req.endpoint,
+                    "estimated_cost_usd": req.estimated_cost_usd,
+                    "reason": req.reason,
+                },
+                run_id=req.session_id,
+            )
         return self.prompt(req=req, operator=operator)
 
     def decide_create_with_mode(
@@ -120,6 +214,15 @@ class ApprovalGate:
                 operator="human",
                 timestamp=datetime.now(UTC).isoformat(),
                 note="auto_denied_by_policy",
+            )
+        if normalized == "web":
+            return self._web_prompt(
+                request_data={
+                    "type": "agent_create",
+                    "top_candidate": dict(top_candidate) if top_candidate else {},
+                },
+                run_id=run_id,
+                timeout=120,
             )
 
         self.console.print("\n[bold yellow]Approval required for creating a new agent[/bold yellow]")

@@ -115,6 +115,25 @@ Message types must have a `type: Literal["<type_name>"]` discriminator field.
 
 ---
 
+## Adding a New Base Skill Module
+
+Base skill modules live in `agents/skills/` and form Layer 1 of every agent's system prompt. They describe how to use a specific tool domain at an expert level.
+
+1. Create `agents/skills/<name>.md`. The file should cover:
+   - When to use this capability
+   - Concrete patterns / example tool call arguments
+   - Error handling and edge cases
+   - Output format expectations
+2. Add the module name string to `_BASE_SKILL_IDS` in `closed_claw/registry/search.py` — this makes the LLM aware of the module when generating new agent profiles.
+3. The LLM will automatically assign the module to relevant agents via `generate_agent_profile`. You can also manually add the name to an existing `manifest.json` `skill_ids` list.
+
+**Rules:**
+- Module names must be lowercase `snake_case` and match the filename without `.md`.
+- Never include agent-specific content in a base skill module — that belongs in `agents/<agent_id>/skill.md`.
+- `skill_ids` in `AgentManifest` are always validated against `_BASE_SKILL_IDS` in `_normalize_profile_payload`; unknown IDs are silently dropped.
+
+---
+
 ## Testing
 
 - One test file per module: `tests/unit/test_<module_name>.py`.

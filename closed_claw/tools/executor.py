@@ -70,6 +70,21 @@ def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
 
 
 class ToolExecutor:
+    # Common LLM arg-name mistakes → canonical arg names per tool.
+    # Defence-in-depth: even when the prompt tells the LLM the correct names,
+    # some models still use natural-language aliases like "command" for "cmd".
+    _ARG_ALIASES: dict[str, dict[str, str]] = {
+        "terminal": {"command": "cmd", "shell": "cmd", "run": "cmd", "exec": "cmd",
+                      "timeout": "timeout_s"},
+        "http_api": {"body": "json", "data": "json", "timeout": "timeout_s"},
+        "web_fetch": {"timeout": "timeout_s", "link": "url"},
+        "file_io": {"operation": "op", "action": "op", "file": "path", "file_path": "path",
+                     "filepath": "path", "data": "content", "text": "content"},
+        "python_exec": {"script": "code", "python": "code", "snippet": "code",
+                         "timeout": "timeout_s"},
+        "sql_query": {"sql": "query", "database": "db_path", "db": "db_path"},
+    }
+
     def __init__(self, workspace_root: Path, allowed_roots: list[Path] | None = None) -> None:
         """Initialize the instance."""
         self.workspace_root = workspace_root.resolve()
@@ -77,10 +92,28 @@ class ToolExecutor:
         if allowed_roots:
             self.allowed_roots.extend(p.resolve() for p in allowed_roots)
 
+    @classmethod
+    def _normalize_args(cls, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Remap common LLM arg-name mistakes to canonical names."""
+        aliases = cls._ARG_ALIASES.get(tool)
+        if not aliases:
+            return args
+        normalized: dict[str, Any] = {}
+        for key, value in args.items():
+            canonical = aliases.get(key, key)
+            # Don't overwrite an already-present canonical key
+            if canonical in normalized:
+                continue
+            normalized[canonical] = value
+        return normalized
+
     def execute(self, tool: str, args: dict[str, Any], allowlist: list[str]) -> dict[str, Any]:
         """Run execute."""
         if tool not in allowlist:
             raise ToolExecutionError(f"tool '{tool}' is not allowed for this agent")
+
+        # Normalize common arg-name aliases before dispatching
+        args = self._normalize_args(tool, args)
 
         if tool == "terminal":
             return self._terminal(args)

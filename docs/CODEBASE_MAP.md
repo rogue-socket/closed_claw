@@ -62,11 +62,15 @@ Always import `BaseModel`/`Field` from here, not directly from `pydantic`.
 - `db_path` — path to `registry.db`
 - `agents_dir` — root of all agent capsule dirs
 - `run_logs_dir` — where JSONL run logs go
-- `llm_provider` — `heuristic | openai | gemini | claude`
-- `llm_model` — provider-specific model string
+- `llm_provider` — `siemens | openai | gemini | claude` (default: `siemens`)
+- `llm_model` — provider-specific model string (default: `qwen3-30b-a3b-instruct-2507` for siemens)
+- `llm_timeout_sec` — LLM call timeout in seconds
 - `create_approval_mode` / `api_approval_mode` — `interactive | approve | deny`
 - `low_confidence_threshold` — float; below this triggers create/reuse gate
+- `siemens_api_key` / `openai_api_key` / `gemini_api_key` / `anthropic_api_key` — provider keys
+- `siemens_base_url` / `openai_base_url` / `gemini_base_url` / `anthropic_base_url` — provider base URLs
 - `extra_allowed_paths` — filesystem sandbox roots for tool execution
+- `subtask_max_attempts` — retry count for failed subtasks
 
 ---
 
@@ -87,6 +91,22 @@ Called by `main()` in `cli.py` when no subcommand is given.
 | Symbol | Type | What it does |
 |--------|------|-------------|
 | `run_setup_wizard` | function | Prompts for provider → model → API key → verifies → writes `.env` |
+
+---
+
+## Package: `closed_claw/agents/`
+
+### `factory.py`
+**Purpose:** Creates agent capsule directories and manages the `registry.json` flat index.
+
+| Symbol | Type | What it does |
+|--------|------|-------------|
+| `ENTRYPOINT_TEMPLATE` | str constant | Template for `entrypoint.py` (currently **v12**). Contains the full multi-step agent loop (MAX_STEPS=12, MAX_RETRIES_PER_STEP=3). v12 adds full tool `args_schema` in plan/fix prompts (v11 added `_execute_llm_http()` (stdlib urllib) and `system_prompt` injection). Auto-migrated on `cli init` / `cli run`. |
+| `AgentFactory` | class | Creates capsule dirs: `manifest.json`, `skill.md`, `memory.db`, `entrypoint.py`, `logs/` |
+| `AgentFactory.create_capsule(name, description, ..., skill_content, skill_ids)` | method | Writes capsule files to `agents_dir/<agent_id>/`; updates `registry.json`; stores `skill_ids` in manifest |
+| `AgentFactory.save_registry_index(path, manifests)` | static method | Overwrites `registry.json` with a fresh list |
+
+**Version detection:** The entrypoint template version tag (`CLOSED_CLAW_ENTRYPOINT_VERSION=13`) is read by `_migrate_legacy_agents` in `cli.py` to auto-upgrade older capsules. v13 replaced the frozen upfront plan with a ReAct-style observe→think→act loop.
 
 ---
 
@@ -135,7 +155,9 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 | `_handle_api_call_intent` | method | Routes api_call_intent through `ApprovalGate` and circuit breaker |
 | `_handle_tool_call_intent` | method | Validates allowlist + executes via `ToolExecutor` |
 | `_acquire_agent_for_role` | method | Embeds role description → semantic search → rerank → reuse or create |
-| `_create_agent` | method | Calls `AgentFactory.create`, generates skill.md + tools_allowlist via LLM/heuristic |
+| `_create_agent` | method | Calls `AgentFactory.create_capsule`, generates skill.md + tools_allowlist + skill_ids via LLM/heuristic |
+| `_compose_system_prompt` | method | Loads base skill modules (Layer 1) + role overlay (Layer 2) into a single system prompt string |
+| `_request_config_for_agent` | method | Builds `config` dict for `CoordinatorRequest` — includes `llm`, `system_prompt` (composed), and `tool_registry` |
 | `_merge` | static method | Shallow-merges two state dicts |
 | `_emit_runlog` | method | Writes a named event to the run's JSONL log |
 
@@ -212,7 +234,7 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 
 | Symbol | What it does |
 |--------|-------------|
-| `AgentManifest` | Pydantic model — full agent identity, metrics, tools, embedding |
+| `AgentManifest` | Pydantic model — full agent identity, metrics, tools, embedding. Includes `skill_ids: list[str]` for base skill module selection. |
 | `SearchCandidate` | Dataclass — `{agent_id, score, description}` from vector search |
 | `RegistryStore` | All DB operations |
 | `RegistryStore.upsert_agent(manifest)` | Insert or update agent + vector |
@@ -230,12 +252,14 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 
 | Symbol | What it does |
 |--------|-------------|
+| `_BASE_SKILL_IDS` | `list[str]` constant — canonical list of available base skill module IDs; must match files in `agents/skills/` |
 | `RerankerProtocol` | Protocol interface — `.rerank(task, candidates) -> list[Candidate]` |
 | `HeuristicReranker` | Default: keyword overlap + recency scoring |
 | `LLMReranker` | Uses configured LLM provider to rerank candidates |
 | `build_reranker(settings)` | Returns the right reranker based on `settings.llm_provider` |
-| `generate_task_plan(task, settings)` | Decomposes task text into subtask list via LLM/heuristic |
-| `generate_agent_profile(role, settings)` | Generates `skill_md` + `tools_allowlist` for a new agent |
+| `generate_task_plan(settings, task, *, phase, discovery_results)` | Decomposes task text into subtask list via LLM/heuristic |
+| `generate_agent_profile(settings, task, supported_tools, fallback_tools)` | Generates `skill_md`, `tools_allowlist`, and `skill_ids` for a new agent |
+| `_normalize_profile_payload(payload)` | Validates and normalises LLM-returned profile dict; filters `skill_ids` to valid `_BASE_SKILL_IDS` members |
 
 ---
 
@@ -297,24 +321,39 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 ## Package: `closed_claw/web/`
 
 ### `server.py`
-**Purpose:** FastAPI/Starlette web server skeleton (not production-ready).
+**Purpose:** FastAPI/Starlette web dashboard. Launched via `python -m closed_claw.cli web` → `http://127.0.0.1:7860`.
 
-Serves `ui.html` and exposes basic REST endpoints. Not wired into the CLI yet.
+Exposes REST endpoints for agent listing, run history, and audit events. Serves `ui.html`.
 
 ### `ui.html`
-Single-page HTML UI intended to be served by `server.py`.
+Single-page HTML UI served by `server.py`.
 
 ---
 
 ## Generated Directories (runtime, not in source control)
 
+### `agents/skills/`
+Shared base skill library. Each file is a Markdown document describing tool usage patterns for one capability domain. These are **not agent-specific** — they are composed into any agent's system prompt based on `manifest.skill_ids`.
+
+| File | Domain |
+|------|-------|
+| `terminal.md` | Shell execution, process management, packages |
+| `python_scripting.md` | Python code via `python_exec` tool |
+| `git.md` | Git workflow via `terminal` tool |
+| `file_system.md` | `file_io` tool patterns |
+| `web_http.md` | `http_api` and `web_fetch` tool patterns |
+| `sql_databases.md` | `sql_query` tool, SELECT-only SQLite |
+| `data_analysis.md` | Cross-tool data pipeline patterns |
+
+To add a module: create the `.md` file here and add its name to `_BASE_SKILL_IDS` in `registry/search.py`.
+
 ### `agents/<agent_id>/`
 | File | Purpose |
 |------|---------|
-| `manifest.json` | `AgentManifest` — identity, tools, metrics, tags, embedding |
-| `skill.md` | Role definition injected as system prompt |
+| `manifest.json` | `AgentManifest` — identity, tools, metrics, tags, skill_ids, embedding |
+| `skill.md` | Role overlay (Layer 2) — agent-specific identity, decision rules, output format |
 | `memory.db` | Per-agent SQLite episodic memory (key/value store) |
-| `entrypoint.py` | Agent subprocess; speaks JSON-line protocol |
+| `entrypoint.py` | Agent subprocess (v12); speaks JSON-line protocol; reads `config["system_prompt"]` |
 | `logs/` | Per-run output artifacts |
 
 ### `agents/registry.json`

@@ -6,14 +6,21 @@ Fastest path to running Closed Claw locally.
 
 ## 1) Environment Setup
 
-```bash
-# Option A: conda (recommended)
-conda create -n closed_claw python=3.11 -y
-conda activate closed_claw
+The venv is named `closed_claw` and lives inside the workspace root (alongside the source package of the same name).
 
-# Option B: venv
-python3.11 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+```powershell
+# Windows (PowerShell) — venv already created
+.\closed_claw\Scripts\Activate.ps1
+
+# If you need to recreate it:
+py -3.11 -m venv closed_claw --without-pip
+.\closed_claw\Scripts\python.exe -m ensurepip --upgrade
+```
+
+```bash
+# macOS / Linux
+python3.11 -m venv closed_claw
+source closed_claw/bin/activate
 ```
 
 Install dependencies:
@@ -26,11 +33,12 @@ pip install -r requirements.txt
 
 ## 2) Configure
 
-```bash
-cp .env.example .env
+```powershell
+copy .env.example .env   # Windows
+# cp .env.example .env  # macOS/Linux
 ```
 
-Edit `.env` if you want a real LLM provider. Defaults use `heuristic` (fully local, no API key needed).
+Edit `.env` and set `SIEMENS_API_KEY` (the default provider is `siemens`). For other providers, change `CLOSED_CLAW_LLM_PROVIDER` and set the matching API key.
 
 Or use the interactive setup wizard:
 
@@ -77,14 +85,21 @@ python -m closed_claw.cli run "your task here" \
   --api-approval-mode approve
 ```
 
-### With a real LLM provider
+### With explicit provider / model override
 
-```bash
-export OPENAI_API_KEY="sk-..."
-python -m closed_claw.cli run "your task here" \
-  --create-approval-mode approve \
-  --api-approval-mode approve \
-  --llm-provider openai \
+```powershell
+# Siemens (default)
+python -m closed_claw.cli run "your task here" `
+  --create-approval-mode approve `
+  --api-approval-mode approve `
+  --llm-provider siemens `
+  --llm-model qwen3-30b-a3b-instruct-2507
+
+# OpenAI
+python -m closed_claw.cli run "your task here" `
+  --create-approval-mode approve `
+  --api-approval-mode approve `
+  --llm-provider openai `
   --llm-model gpt-4o-mini
 ```
 
@@ -186,13 +201,14 @@ The agent executes this using `file_io` and `terminal` tools from its `tools_all
 
 | Variable | Default | Purpose |
 |----------|---------|--------|
-| `CLOSED_CLAW_LLM_PROVIDER` | `heuristic` | `heuristic \| openai \| gemini \| claude` |
-| `CLOSED_CLAW_LLM_MODEL` | provider default | Model ID string |
+| `CLOSED_CLAW_LLM_PROVIDER` | `siemens` | `siemens \| openai \| gemini \| claude` |
+| `CLOSED_CLAW_LLM_MODEL` | `qwen3-30b-a3b-instruct-2507` | Model ID string |
 | `CLOSED_CLAW_CREATE_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
 | `CLOSED_CLAW_API_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
 | `CLOSED_CLAW_DB_PATH` | `.closed_claw/registry.db` | SQLite registry path |
 | `CLOSED_CLAW_AGENTS_DIR` | `agents` | Agent capsule root dir |
 | `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` | _(empty)_ | Comma-separated absolute paths for tool sandboxing |
+| `SIEMENS_API_KEY` | _(empty)_ | Siemens LLM key (default provider) |
 | `OPENAI_API_KEY` | _(empty)_ | OpenAI key |
 | `GEMINI_API_KEY` | _(empty)_ | Gemini key |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic key |

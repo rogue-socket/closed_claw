@@ -68,15 +68,14 @@ class Settings:
         cwd = Path.cwd()
         dotenv = _load_dotenv(cwd / ".env")
         paid = _getenv("CLOSED_CLAW_PAID_API_PROVIDERS", "", dotenv)
-        provider = _getenv("CLOSED_CLAW_LLM_PROVIDER", "heuristic", dotenv).lower()
+        provider = _getenv("CLOSED_CLAW_LLM_PROVIDER", "siemens", dotenv).lower()
         extra_paths_raw = _getenv("CLOSED_CLAW_EXTRA_ALLOWED_PATHS", "", dotenv)
         default_model = {
             "openai": "gpt-4o-mini",
-            "gemini": "gemini-1.5-flash",
+            "gemini": "gemini-2.5-flash",
             "claude": "claude-3-5-haiku-latest",
             "siemens": "qwen3-30b-a3b-instruct-2507",
-            "heuristic": "local-heuristic",
-        }.get(provider, "local-heuristic")
+        }.get(provider, "gpt-4o-mini")
         return cls(
             db_path=Path(_getenv("CLOSED_CLAW_DB_PATH", ".closed_claw/registry.db", dotenv)).expanduser(),
             agents_dir=(cwd / _getenv("CLOSED_CLAW_AGENTS_DIR", "agents", dotenv)).resolve(),

@@ -10,6 +10,13 @@ from closed_claw.config import Settings
 def test_settings_reads_dotenv(monkeypatch, tmp_path: Path):
     """Test settings reads dotenv."""
     monkeypatch.chdir(tmp_path)
+    # Remove any OS-level env vars so the .env file values are not shadowed.
+    for _key in [
+        "CLOSED_CLAW_LLM_PROVIDER",
+        "CLOSED_CLAW_LLM_MODEL",
+        "GEMINI_API_KEY",
+    ]:
+        monkeypatch.delenv(_key, raising=False)
     (tmp_path / ".env").write_text(
         "CLOSED_CLAW_LLM_PROVIDER=gemini\n"
         "CLOSED_CLAW_LLM_MODEL=gemini-2.5-flash-lite\n"

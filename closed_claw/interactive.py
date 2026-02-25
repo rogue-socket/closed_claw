@@ -101,7 +101,7 @@ def _run_task_interactive(handlers: dict[str, callable]) -> None:
     context_raw = raw_context.strip() or None
     create_mode = _choose_mode("Create approval mode", default="interactive")
     api_mode = _choose_mode("API approval mode", default="interactive")
-    llm_provider = _choose_provider(default="heuristic")
+    llm_provider = _choose_provider(default="siemens")
     llm_model = input("LLM model [provider default]: ").strip() or None
     organize_path = _safe_input("Organize path override [none]: ")
     dry_run = (_safe_input("Organize dry-run? (yes/no) [no]: ") or "").strip().lower() in {"yes", "y"}
@@ -198,7 +198,7 @@ def _choose_mode(label: str, default: str) -> str:
 
 def _choose_provider(default: str) -> str:
     """Run choose provider."""
-    options = ["heuristic", "openai", "gemini", "claude"]
+    options = ["openai", "gemini", "claude", "siemens"]
     print("LLM provider:")
     for i, provider in enumerate(options, start=1):
         print(f"  {i}. {provider}")

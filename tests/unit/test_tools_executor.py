@@ -50,3 +50,39 @@ def test_supported_tools_registry():
     """Test supported tools registry."""
     assert "terminal" in SUPPORTED_TOOLS
     assert "organize_by_type" not in SUPPORTED_TOOLS
+
+
+def test_terminal_arg_normalization(tmp_path: Path):
+    """Test that common LLM aliases like 'command' are normalized to 'cmd'."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    # LLMs often send {"command": "..."} instead of {"cmd": "..."}
+    out = executor.execute(
+        "terminal", {"command": "echo normalized"}, allowlist=["terminal"]
+    )
+    assert out["returncode"] == 0
+    assert "normalized" in out["stdout"]
+
+
+def test_file_io_arg_normalization(tmp_path: Path):
+    """Test that file_io aliases like 'operation'/'file_path' are normalized."""
+    (tmp_path / "demo.txt").write_text("content", encoding="utf-8")
+    executor = ToolExecutor(workspace_root=tmp_path)
+    out = executor.execute(
+        "file_io",
+        {"operation": "read", "file_path": str(tmp_path / "demo.txt")},
+        allowlist=["file_io"],
+    )
+    assert out["content"] == "content"
+
+
+def test_normalize_does_not_overwrite_canonical(tmp_path: Path):
+    """Test that normalization doesn't overwrite an already-present canonical key."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    # If both 'cmd' (canonical) and 'command' (alias) are present, 'cmd' wins
+    out = executor.execute(
+        "terminal",
+        {"cmd": "echo canonical", "command": "echo alias"},
+        allowlist=["terminal"],
+    )
+    assert out["returncode"] == 0
+    assert "canonical" in out["stdout"]

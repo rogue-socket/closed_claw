@@ -54,9 +54,11 @@ class Settings:
     openai_api_key: str
     gemini_api_key: str
     anthropic_api_key: str
+    siemens_api_key: str
     openai_base_url: str
     gemini_base_url: str
     anthropic_base_url: str
+    siemens_base_url: str
     extra_allowed_paths: list[Path]
     subtask_max_attempts: int = 2
 
@@ -72,6 +74,7 @@ class Settings:
             "openai": "gpt-4o-mini",
             "gemini": "gemini-1.5-flash",
             "claude": "claude-3-5-haiku-latest",
+            "siemens": "qwen3-30b-a3b-instruct-2507",
             "heuristic": "local-heuristic",
         }.get(provider, "local-heuristic")
         return cls(
@@ -119,11 +122,13 @@ class Settings:
             openai_api_key=_getenv("OPENAI_API_KEY", "", dotenv),
             gemini_api_key=_getenv("GEMINI_API_KEY", "", dotenv),
             anthropic_api_key=_getenv("ANTHROPIC_API_KEY", "", dotenv),
+            siemens_api_key=_getenv("SIEMENS_API_KEY", "", dotenv),
             openai_base_url=_getenv("OPENAI_BASE_URL", "https://api.openai.com", dotenv),
             gemini_base_url=_getenv(
                 "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com", dotenv
             ),
             anthropic_base_url=_getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com", dotenv),
+            siemens_base_url=_getenv("SIEMENS_BASE_URL", "https://api.siemens.com/llm", dotenv),
             extra_allowed_paths=[
                 Path(p.strip()).expanduser().resolve()
                 for p in extra_paths_raw.split(",")

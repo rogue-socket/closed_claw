@@ -1169,6 +1169,9 @@ class CoordinatorNodes:
         elif provider == "claude":
             key = key or self.settings.anthropic_api_key.strip()
             base_url = self.settings.anthropic_base_url
+        elif provider == "siemens":
+            key = key or self.settings.siemens_api_key.strip()
+            base_url = self.settings.siemens_base_url
         return {
             "provider": provider,
             "model": self.settings.llm_model,

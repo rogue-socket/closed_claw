@@ -1,191 +1,297 @@
 # Architecture
 
+> Deep reference. For a quick file-by-file map, see `CODEBASE_MAP.md`. For conventions, see `CONVENTIONS.md`.
+
+---
+
 ## Overview
 
-Closed Claw is a local multi-agent orchestration system with capsule agents, a registry-backed router, policy gates, and structured runtime contracts.
+Closed Claw is a **local capsule-based multi-agent orchestrator**. A coordinator LLM routes incoming tasks to specialized agent subprocesses ("capsules"), enforces approval gates, executes tools on behalf of agents, and records full audit/observability traces — all on a single machine, no external services required by default.
 
-Primary components:
-- Coordinator graph (`LangGraph`)
-- Agent capsules (`agents/<agent_id>/`)
-- Registry + audit store (`SQLite`)
-- Runtime protocol (`JSON lines over stdin/stdout`)
-- Policy engine (human-in-the-loop approvals)
-- Tool execution layer (allowlist-enforced)
-- Run logs (`JSONL`)
+**Primary components:**
+
+| Component | Location | Role |
+|-----------|----------|------|
+| Coordinator graph | `coordinator/graph.py`, `coordinator/nodes.py` | Central LangGraph state machine that drives every run |
+| Agent capsules | `agents/<agent_id>/` | Isolated subprocesses; implement the JSON-line protocol |
+| Registry + vectors | `registry/store.py`, `registry/schema.sql` | SQLite store for agents, runs, audit events; sqlite-vec for semantic search |
+| Runtime protocol | `runtime/protocol.py`, `runtime/runner.py` | JSON-line message framing + subprocess lifecycle |
+| Policy engine | `policy/approval.py`, `policy/audit.py` | Human-in-the-loop gates; structured audit trail |
+| Tool execution | `tools/executor.py` | Sandboxed terminal, HTTP, file I/O, Python, SQL tools |
+| Embeddings | `embeddings/provider.py` | sentence-transformers or zero-vector fallback |
+| Run logs | `observability/runlog.py` | Per-run JSONL event stream |
+| CLI | `cli.py` | All user-facing commands |
+
+---
 
 ## Coordinator Flow
 
-1. `ingest_task`
-2. `decompose_task` (LLM/heuristic plan generation into atomic subtasks)
-3. `execute_task_pool` (role-tag agent acquisition, dependency-aware execution)
-9. `validate_outputs`
-10. `approval_gate_for_api_calls` (runtime handshake handles decisions)
-11. `continue_or_deny_api_path`
-12. `update_registry_and_audit`
-13. `synthesize_final_response`
-14. `failure_recovery`
+Every `run` command follows this LangGraph node sequence:
 
-## Task Pool Execution Model
+```
+ingest_task
+    │  Validate task string; assign run_id + session_id; initialize state
+    ▼
+decompose_task
+    │  LLM/heuristic: split task into atomic subtasks with role tags + dependency graph
+    ▼
+execute_task_pool
+    │  For each subtask (dependency-aware):
+    │    1. Embed role description → semantic search → rerank → reuse or create agent
+    │    2. Launch agent subprocess
+    │    3. Drive JSON-line I/O loop:
+    │       - api_call_intent  → ApprovalGate + circuit breaker → ApiCallDecision
+    │       - tool_call_intent → allowlist check → ToolExecutor → ToolCallResult
+    │    4. Receive AgentResponse; record result + metrics
+    ▼
+validate_outputs
+    │  Assert all subtasks completed OK; surface failures
+    ▼
+update_registry_and_audit
+    │  Update agent usage_count / success_rate / avg_latency; write audit rows
+    ▼
+synthesize_final_response
+    │  Merge subtask results into a single response string
+    ▼
+    END
+```
 
-Current implementation:
-- The supervisor owns the task pool loop during a run.
-- Subtasks move through `waiting -> pending -> in_progress -> completed/failed`.
-- Dependencies are enforced before execution.
-- Role tags determine agent reuse/create and assignment.
-- Status updates are emitted as `task_pool_update` events to run logs and surfaced in CLI.
+State flows as an immutable-merge dict (`CoordinatorState`) through every node. Each node returns `_merge(state, **updates)` — it never mutates the input.
 
-Known limitation:
-- This is in-run orchestration, not persistent background workers.
-- Agents do not run as standalone daemons that independently poll shared task storage.
+---
 
-TODO (target architecture):
-- Promote task pool to a durable queue/state store.
-- Run persistent background workers per capability role tag.
-- Workers poll/claim tasks every `CLOSED_CLAW_TASK_POOL_POLL_INTERVAL_SEC` (default 30s).
-- Add lease/heartbeat + retry semantics to avoid duplicate claims and stuck tasks.
-- Add CLI `runs watch` for live checklist from queue state (not only runlog tailing).
+## Agent Capsule Model
 
-Acceptance criteria for this TODO:
-- A long task continues after CLI process exits.
-- Multiple workers can execute independent subtasks concurrently.
-- Dependency-blocked tasks remain `waiting` until prerequisites complete.
-- User can reconnect and see accurate live status + final synthesized output.
+### Directory Structure
 
-## Capsule Model
+```
+agents/<agent_id>/
+  manifest.json   # AgentManifest — identity, metrics, tools_allowlist, tags, embedding
+  skill.md        # Role definition — injected as system prompt into the agent
+  memory.db       # SQLite episodic memory (key/value; agent-writable)
+  entrypoint.py   # Subprocess entry; speaks JSON-line protocol
+  logs/           # Per-run output artifacts
+```
 
-Each agent capsule contains:
-- `manifest.json`: identity, tools, metrics, tags, embedding metadata
-- `skill.md`: role definition
-- `memory.db`: local episodic memory
-- `entrypoint.py`: agent runtime
-- `logs/`: local execution artifacts
+### Lifecycle
 
-Coordinator can create new capsules when match confidence is low.
-On creation, agent description is generated from LLM provider when configured (fallback: heuristic summary).
+1. **Creation:** `CoordinatorNodes._create_agent` calls `AgentFactory.create`, which writes the capsule directory. `generate_agent_profile` (via LLM or heuristic) produces `skill.md` and `tools_allowlist`.
+2. **Reuse:** If a registered agent's embedding is above `low_confidence_threshold` for the current task, it is reused directly.
+3. **Execution:** `AgentRunner.run(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop.
+4. **Metrics:** After each run, `RegistryStore.update_agent_metrics` updates `usage_count`, `success_rate`, `avg_latency_ms`.
 
-## Runtime Protocol
+---
 
-Transport: newline-delimited JSON on stdin/stdout.
+## JSON-Line Protocol
 
-Coordinator request:
-- `session_id`, `task`, `context`, `artifacts`, `config`
+Transport: `\n`-delimited JSON over **stdin** (coordinator → agent) and **stdout** (agent → coordinator).
 
-Agent-to-coordinator intents:
-- `api_call_intent` -> coordinator returns `api_call_decision`
-- `tool_call_intent` -> coordinator returns `tool_call_result`
+### Message Flow
 
-Final response:
-- `status`, `result`, `memory_updates`, `artifacts`, `metrics`, optional error fields
+```
+Coordinator                         Agent
+────────────                        ─────
+                CoordinatorRequest
+               ─────────────────────►
+                                    (optional, repeat):
+                ToolCallIntent
+               ◄─────────────────────
+                ToolCallResult
+               ─────────────────────►
+                ApiCallIntent
+               ◄─────────────────────
+                ApiCallDecision
+               ─────────────────────►
+                AgentResponse (final)
+               ◄─────────────────────
+```
 
-## Registry and Persistence
+### Message Types (all in `runtime/protocol.py`)
 
-DB: `.closed_claw/registry.db`
+| Type | Direction | Key fields |
+|------|-----------|-----------|
+| `CoordinatorRequest` | → Agent | `session_id`, `task`, `context`, `artifacts`, `config` |
+| `ToolCallIntent` | ← Agent | `tool`, `args`, `reason` |
+| `ToolCallResult` | → Agent | `ok`, `result`, `error` |
+| `ApiCallIntent` | ← Agent | `provider`, `endpoint`, `estimated_cost_usd`, `reason` |
+| `ApiCallDecision` | → Agent | `approved`, `note` |
+| `AgentResponse` | ← Agent | `status`, `result`, `memory_updates`, `artifacts`, `metrics` |
 
-Key tables:
-- `agents`
-- `agent_vectors` (sqlite-vec virtual table)
-- `runs`
-- `agent_compositions`
-- `provider_circuit_breakers`
-- `audit_events`
+An agent **must** emit exactly one `AgentResponse` as its final line.
 
-Human-readable index:
-- `agents/registry.json`
+---
 
-Run logs:
-- `.closed_claw/runs/<run_id>.jsonl`
+## Registry and Semantic Search
 
-## Routing and Selection
+### Storage
 
-Current behavior:
-- semantic retrieval from registry vectors
-- heuristic reranking by default
-- optional LLM reranking via `openai`, `gemini`, or `claude`
-- low-confidence threshold check
-- optional human create/reuse gate
+All persistent state lives in `.closed_claw/registry.db` (SQLite):
 
-Provider configuration:
-- `CLOSED_CLAW_LLM_PROVIDER=heuristic|openai|gemini|claude`
-- `CLOSED_CLAW_LLM_MODEL=<model-id>`
-- key via provider-specific env var (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) or `CLOSED_CLAW_LLM_API_KEY`
+| Table | Purpose |
+|-------|---------|
+| `agents` | Agent manifest (JSON blob) + indexed scalar fields |
+| `agent_vectors` | sqlite-vec virtual table for cosine similarity search |
+| `runs` | Run history with status, latency, agent reference |
+| `agent_compositions` | Multi-agent composition records |
+| `provider_circuit_breakers` | Per-provider failure counters + reset timestamps |
+| `audit_events` | Structured audit trail |
+
+A human-readable mirror lives at `agents/registry.json`.
+
+### Routing Pipeline
+
+```
+task text
+    │
+    ▼
+EmbeddingProvider.embed(task)       # 384-dim vector
+    │
+    ▼
+RegistryStore.search_agents(vector) # cosine similarity via sqlite-vec
+    │
+    ▼
+Reranker.rerank(task, candidates)   # HeuristicReranker or LLMReranker
+    │
+    ▼
+score < low_confidence_threshold?
+    │ yes → ApprovalGate (create/reuse) → create new capsule
+    │ no  → reuse existing agent
+```
+
+`build_reranker(settings)` in `registry/search.py` selects `HeuristicReranker` (default) or `LLMReranker` based on `settings.llm_provider`.
+
+---
 
 ## Policy and Safety
 
-### Approval gates
-- Create/reuse (low confidence)
-- External paid API calls
+### Approval Gates
 
-Modes:
-- `interactive`
-- `approve`
-- `deny`
+Two gates, each independently configurable:
 
-### Circuit breaker
-- Tracks repeated provider failures/denials
-- Blocks provider until reset interval expires
+| Gate | Trigger | Config var |
+|------|---------|-----------|
+| Create/reuse gate | Reranker score below threshold | `CLOSED_CLAW_CREATE_APPROVAL_MODE` |
+| API approval gate | Agent emits `api_call_intent` for a paid provider | `CLOSED_CLAW_API_APPROVAL_MODE` |
 
-### Tool safety
-- Per-agent allowlist in `manifest.json`
-- Unsupported or disallowed tools are denied
-- `sql_query` restricted to `SELECT`
+Modes for each gate:
+- `interactive` — prompts operator on stdin with `api_approval_timeout_sec` deadline
+- `approve` — auto-approves (use in CI scripts: `--api-approval-mode approve`)
+- `deny` — auto-denies
 
-## Tooling Layer
+### Circuit Breaker
 
-Available tools:
-- `terminal`
-- `http_api`
-- `web_fetch`
-- `file_io`
-- `python_exec`
-- `sql_query`
+Tracks per-provider failure/denial counts in `provider_circuit_breakers` table. After `CLOSED_CLAW_CIRCUIT_BREAKER_FAILURES` consecutive failures, the provider is blocked until `CLOSED_CLAW_CIRCUIT_BREAKER_RESET_SEC` elapses. This prevents runaway retry loops against paid APIs.
 
-Execution model:
-- Agent requests tool usage via protocol
-- Coordinator executes centrally
-- Results returned via protocol
-- Every tool call is audited
+### Tool Sandbox
 
-Note: folder organization is handled directly inside the agent runtime logic, not as a coordinator tool.
+- Each agent's `manifest.json` has a `tools_allowlist` — only listed tool names are executable by that agent.
+- `ToolExecutor` enforces `allowed_roots` filesystem roots (from `Settings.extra_allowed_paths`).
+- `sql_query` validates the query begins with `SELECT` before execution.
 
-## Configuration
+---
 
-Configuration is environment-variable driven via `closed_claw/config.py` and `.env.example`.
+## Tool Execution Layer
 
-Most important knobs:
-- storage paths (`DB`, `agents`, `run logs`)
-- approval modes
-- paid-provider classification
-- retry/timeouts
-- circuit-breaker thresholds
-- sqlite-vec strictness
+Tools are invoked by the coordinator on behalf of agents (agents never execute tools directly).
+
+| Tool | Description |
+|------|-------------|
+| `terminal` | Shell command in workspace |
+| `http_api` | HTTP request (GET/POST/etc.) |
+| `web_fetch` | Fetch + extract text from a URL |
+| `file_io` | list/read/write/append text files within allowed roots |
+| `python_exec` | Execute a Python code snippet in a subprocess |
+| `sql_query` | SELECT-only SQLite query |
+
+Flow: `tool_call_intent` → allowlist check → `ToolExecutor.execute(tool, args)` → `ToolCallResult`.
+
+---
+
+## Configuration System
+
+All configuration is via environment variables (read from `os.environ` first, then `.env` file).
+
+Key variable groups:
+
+| Group | Prefix/Example |
+|-------|---------------|
+| Storage paths | `CLOSED_CLAW_DB_PATH`, `CLOSED_CLAW_AGENTS_DIR`, `CLOSED_CLAW_RUN_LOGS_DIR` |
+| Approval modes | `CLOSED_CLAW_CREATE_APPROVAL_MODE`, `CLOSED_CLAW_API_APPROVAL_MODE` |
+| LLM provider | `CLOSED_CLAW_LLM_PROVIDER`, `CLOSED_CLAW_LLM_MODEL` |
+| API keys | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` |
+| Thresholds | `CLOSED_CLAW_LOW_CONFIDENCE_THRESHOLD`, `CLOSED_CLAW_AGENT_TIMEOUT_SEC` |
+| Circuit breaker | `CLOSED_CLAW_CIRCUIT_BREAKER_FAILURES`, `CLOSED_CLAW_CIRCUIT_BREAKER_RESET_SEC` |
+| Sandbox | `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` (comma-separated absolute paths) |
+
+See `.env.example` for the complete list with defaults.
+
+---
+
+## Task Pool Execution Model
+
+### Current Behavior (in-run only)
+
+The supervisor owns the task pool loop for the duration of a single `run` invocation:
+
+```
+waiting → pending → in_progress → completed / failed
+```
+
+- Dependencies are enforced: a subtask stays `waiting` until all its prerequisite subtasks are `completed`.
+- Role tags determine which agent handles each subtask.
+- If a subtask reaches `CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS` (default 2) failures, it is marked `failed`.
+- Status updates are emitted as `task_pool_update` events to the run JSONL log.
+
+### Known Limitation
+
+The task pool is **not durable** — if the CLI process exits mid-run, the task pool is lost. There is no persistent background worker. See `docs/todo.md` for the target architecture.
+
+---
 
 ## Extensibility Points
 
-- Replace reranker in `closed_claw/registry/search.py`
-- Add real provider clients behind `api_call_intent`
-- Expand tool implementations in `closed_claw/tools/executor.py`
-- Add richer agent templates in `closed_claw/agents/factory.py`
-- Introduce service API/UI around CLI
+| What to extend | Where |
+|----------------|-------|
+| Add a real LLM provider client | `registry/search.py` (reranker) + `coordinator/nodes.py` (`_handle_api_call_intent`) |
+| Add a new tool | `tools/executor.py` — `SUPPORTED_TOOLS`, `TOOL_REGISTRY`, `ToolExecutor` |
+| Change agent capsule template | `closed_claw/agents/factory.py` — `ENTRYPOINT_TEMPLATE` |
+| Add a coordinator node | `coordinator/nodes.py` + `coordinator/graph.py` |
+| Add a CLI command | `cli.py` — `cmd_<name>` + `_build_parser` |
+| Change approval logic | `policy/approval.py` |
+| Change routing algorithm | `registry/search.py` — implement `RerankerProtocol` |
+| Add DB columns | `registry/schema.sql` + `registry/store.py` + `registry/store.AgentManifest` |
+| Add a web API endpoint | `web/server.py` |
 
-## Operational Commands
+---
 
-- `python -m closed_claw.cli doctor`
-- `python -m closed_claw.cli run ...`
-- `python -m closed_claw.cli agent <agent_id>`
-- `python -m closed_claw.cli runs`
-- `python -m closed_claw.cli audit`
-- `python -m closed_claw.cli runlog <run_id>`
-- `python -m closed_claw.cli setup`
-- `python -m closed_claw.cli` (interactive menu)
-- `python -m closed_claw.cli delete-agent <agent_id>`
-- `python -m closed_claw.cli delete-all-agents`
+## Interactive UX
 
-## Interactive UX Layer
+When invoked with no subcommand (`python -m closed_claw.cli`), the system opens a Rich-powered interactive menu:
 
-Closed Claw now includes an interactive menu layer:
-- default invocation (`python -m closed_claw.cli`) opens greet/menu
-- launch-only ASCII art is shown once when menu starts
-- guided options for setup, init, doctor, run, and inspections
-- setup wizard verifies provider configuration before persisting `.env`
+- ASCII art shown once at startup
+- Numbered options: setup / init / doctor / run / list agents / inspect agent / delete agent
+- All menu paths delegate to the same `cmd_*` functions used by the CLI
 
-This UX is additive; non-interactive subcommands still exist for automation/CI.
+The `setup` wizard prompts for provider → model → API key → runs a live verification request → writes `.env`. No config is saved until the user confirms.
+
+---
+
+## Data Layout
+
+```
+.closed_claw/             # runtime data (gitignored)
+  registry.db             # SQLite main database
+  runs/
+    <run_id>.jsonl        # per-run event stream (one line per event)
+
+agents/                   # agent capsule store
+  registry.json           # human-readable agent list
+  <agent_id>/
+    manifest.json
+    skill.md
+    memory.db
+    entrypoint.py
+    logs/
+```
+
+

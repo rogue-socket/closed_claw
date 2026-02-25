@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Closed Claw Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          claw: { DEFAULT: '#14b8a6', dark: '#0f766e', light: '#5eead4' }
+        }
+      }
+    }
+  }
+</script>
+<style>
+  body { background: #0f172a; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #1e293b; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  .nav-item { @apply flex items-center gap-3 px-3 py-2 rounded-lg text-slate-400 text-sm font-medium cursor-pointer transition-all hover:bg-slate-700 hover:text-white; }
+  .nav-item.active { @apply bg-teal-900/60 text-teal-300 border border-teal-700/40; }
+  .card { @apply bg-slate-800 rounded-xl border border-slate-700/60 p-5; }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold; }
+  .badge-green  { @apply bg-emerald-900/60 text-emerald-300 border border-emerald-700/40; }
+  .badge-red    { @apply bg-red-900/60 text-red-300 border border-red-700/40; }
+  .badge-yellow { @apply bg-yellow-900/60 text-yellow-300 border border-yellow-700/40; }
+  .badge-blue   { @apply bg-blue-900/60 text-blue-300 border border-blue-700/40; }
+  .badge-gray   { @apply bg-slate-700/60 text-slate-300 border border-slate-600/40; }
+  .badge-teal   { @apply bg-teal-900/60 text-teal-300 border border-teal-700/40; }
+  .tbl-row { @apply border-b border-slate-700/40 hover:bg-slate-700/30 transition-colors; }
+  .tbl-head { @apply text-xs font-semibold text-slate-400 uppercase tracking-wider py-3 px-4 text-left; }
+  .tbl-cell { @apply py-3 px-4 text-sm text-slate-300; }
+  .btn      { @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all; }
+  .btn-teal { @apply bg-teal-700 hover:bg-teal-600 text-white; }
+  .btn-ghost { @apply bg-slate-700 hover:bg-slate-600 text-slate-300; }
+  .log-line { font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; line-height: 1.6; }
+  .task-card { @apply rounded-lg border p-3 text-xs font-mono; }
+  .task-waiting    { @apply bg-slate-700/40 border-slate-600/60 text-slate-400; }
+  .task-pending    { @apply bg-yellow-900/30 border-yellow-700/50 text-yellow-300; }
+  .task-in_progress { @apply bg-blue-900/30 border-blue-700/50 text-blue-300; }
+  .task-completed  { @apply bg-emerald-900/30 border-emerald-700/50 text-emerald-300; }
+  .task-failed     { @apply bg-red-900/30 border-red-700/50 text-red-300; }
+  .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.5 } }
+  .fade-in { animation: fadeIn 0.2s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body class="text-slate-100 min-h-screen flex">
+
+<!-- ═══════════════════════ SIDEBAR ═══════════════════════ -->
+<aside class="w-56 min-h-screen bg-slate-900 border-r border-slate-700/60 flex flex-col sticky top-0 h-screen">
+  <div class="px-4 py-5 border-b border-slate-700/60">
+    <div class="flex items-center gap-2.5">
+      <span class="text-2xl">🦞</span>
+      <div>
+        <div class="text-white font-bold text-base leading-tight">Closed Claw</div>
+        <div class="text-teal-400 text-xs">Multi-Agent Orchestrator</div>
+      </div>
+    </div>
+  </div>
+  <nav class="flex-1 px-2 py-4 space-y-1">
+    <div class="nav-item active" data-view="dashboard" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+      Dashboard
+    </div>
+    <div class="nav-item" data-view="agents" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0"/></svg>
+      Agents
+    </div>
+    <div class="nav-item" data-view="runs" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+      Runs
+    </div>
+    <div class="nav-item" data-view="audit" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+      Audit Log
+    </div>
+    <div class="nav-item" data-view="tools" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+      Tools
+    </div>
+    <div class="nav-item" data-view="health" onclick="nav(this)">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+      System Health
+    </div>
+  </nav>
+  <div class="px-3 pb-4">
+    <div id="refresh-indicator" class="text-xs text-slate-500 flex items-center gap-1.5">
+      <span id="refresh-dot" class="w-1.5 h-1.5 rounded-full bg-teal-400"></span>
+      <span id="refresh-label">Live</span>
+    </div>
+  </div>
+</aside>
+
+<!-- ═══════════════════════ MAIN ═══════════════════════ -->
+<main class="flex-1 overflow-auto">
+
+  <!-- ───── DASHBOARD ───── -->
+  <section id="view-dashboard" class="view p-6 fade-in">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-white">Dashboard</h1>
+      <p class="text-slate-400 text-sm mt-1">System overview and recent activity</p>
+    </div>
+
+    <!-- stats cards -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div class="card">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Agents</div>
+        <div id="stat-agents" class="text-3xl font-bold text-white">–</div>
+        <div class="text-slate-500 text-xs mt-1">registered capsules</div>
+      </div>
+      <div class="card">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Runs</div>
+        <div id="stat-runs" class="text-3xl font-bold text-white">–</div>
+        <div class="text-slate-500 text-xs mt-1">total executions</div>
+      </div>
+      <div class="card">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Success Rate</div>
+        <div id="stat-rate" class="text-3xl font-bold text-emerald-400">–</div>
+        <div class="text-slate-500 text-xs mt-1">completed ok</div>
+      </div>
+      <div class="card">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Run Logs</div>
+        <div id="stat-logs" class="text-3xl font-bold text-blue-400">–</div>
+        <div class="text-slate-500 text-xs mt-1">JSONL files on disk</div>
+      </div>
+    </div>
+
+    <!-- coordinator pipeline -->
+    <div class="card mb-6">
+      <div class="text-sm font-semibold text-white mb-4">Coordinator Pipeline</div>
+      <div class="flex items-center gap-1 flex-wrap">
+        <div id="pipeline-nodes"></div>
+      </div>
+    </div>
+
+    <!-- recent runs + recent audit split -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold text-white">Recent Runs</div>
+          <button class="btn btn-ghost text-xs" onclick="nav(document.querySelector('[data-view=runs]'))">View all</button>
+        </div>
+        <div id="dash-runs-table"></div>
+      </div>
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold text-white">Recent Audit Events</div>
+          <button class="btn btn-ghost text-xs" onclick="nav(document.querySelector('[data-view=audit]'))">View all</button>
+        </div>
+        <div id="dash-audit-table"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── AGENTS ───── -->
+  <section id="view-agents" class="view p-6 fade-in hidden">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-bold text-white">Agents</h1>
+        <p class="text-slate-400 text-sm mt-1">Capsule agent registry</p>
+      </div>
+      <input id="agent-search" oninput="filterAgents()" type="text" placeholder="Search agents…"
+        class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-teal-500 w-56" />
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full">
+        <thead class="bg-slate-700/40">
+          <tr>
+            <th class="tbl-head">Agent</th>
+            <th class="tbl-head">Status</th>
+            <th class="tbl-head">Tags</th>
+            <th class="tbl-head">Tools</th>
+            <th class="tbl-head">Uses</th>
+            <th class="tbl-head">Success</th>
+            <th class="tbl-head">Last Used</th>
+            <th class="tbl-head"></th>
+          </tr>
+        </thead>
+        <tbody id="agents-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───── AGENT DETAIL PANEL ───── -->
+  <section id="view-agent-detail" class="view p-6 fade-in hidden">
+    <div class="mb-5">
+      <button onclick="nav(document.querySelector('[data-view=agents]'))" class="btn btn-ghost mb-4">← Back to Agents</button>
+      <h1 class="text-2xl font-bold text-white" id="detail-agent-name">Agent</h1>
+      <div id="detail-agent-id" class="text-slate-500 text-xs font-mono mt-0.5"></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-1 space-y-4">
+        <div class="card" id="detail-meta-card"></div>
+        <div class="card" id="detail-tools-card"></div>
+      </div>
+      <div class="lg:col-span-2 space-y-4">
+        <div class="card" id="detail-skill-card"></div>
+        <div class="card" id="detail-runs-card"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── RUNS ───── -->
+  <section id="view-runs" class="view p-6 fade-in hidden">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-white">Runs</h1>
+      <p class="text-slate-400 text-sm mt-1">Task execution history</p>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full">
+        <thead class="bg-slate-700/40">
+          <tr>
+            <th class="tbl-head">Run ID</th>
+            <th class="tbl-head">Task</th>
+            <th class="tbl-head">Agent</th>
+            <th class="tbl-head">Status</th>
+            <th class="tbl-head">Latency</th>
+            <th class="tbl-head">Created</th>
+            <th class="tbl-head"></th>
+          </tr>
+        </thead>
+        <tbody id="runs-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───── RUN DETAIL ───── -->
+  <section id="view-run-detail" class="view p-6 fade-in hidden">
+    <div class="mb-5">
+      <button onclick="nav(document.querySelector('[data-view=runs]'))" class="btn btn-ghost mb-4">← Back to Runs</button>
+      <div class="flex items-center gap-3">
+        <h1 class="text-2xl font-bold text-white">Run Detail</h1>
+        <div id="run-detail-status"></div>
+      </div>
+      <div id="run-detail-id" class="text-slate-500 text-xs font-mono mt-0.5"></div>
+      <div id="run-detail-task" class="text-slate-300 text-sm mt-1"></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <!-- task pool -->
+      <div class="card">
+        <div class="text-sm font-semibold text-white mb-3">Task Pool</div>
+        <div id="run-task-pool" class="space-y-2 text-xs text-slate-400">Loading…</div>
+      </div>
+      <!-- log viewer -->
+      <div class="card flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold text-white">Run Log</div>
+          <div id="run-log-live" class="text-xs text-teal-400 flex items-center gap-1.5 pulse">
+            <span class="w-1.5 h-1.5 rounded-full bg-teal-400 inline-block"></span> live
+          </div>
+        </div>
+        <div id="run-log-box" class="bg-slate-900 rounded-lg p-3 overflow-auto max-h-96 space-y-0.5 flex-1"></div>
+      </div>
+    </div>
+    <!-- tool calls -->
+    <div class="card mt-4">
+      <div class="text-sm font-semibold text-white mb-3">Tool Calls</div>
+      <div id="run-tool-calls" class="space-y-2"></div>
+    </div>
+  </section>
+
+  <!-- ───── AUDIT ───── -->
+  <section id="view-audit" class="view p-6 fade-in hidden">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-white">Audit Log</h1>
+      <p class="text-slate-400 text-sm mt-1">Policy decisions and approval events</p>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full">
+        <thead class="bg-slate-700/40">
+          <tr>
+            <th class="tbl-head">#</th>
+            <th class="tbl-head">Type</th>
+            <th class="tbl-head">Run ID</th>
+            <th class="tbl-head">Agent ID</th>
+            <th class="tbl-head">Payload</th>
+            <th class="tbl-head">Time</th>
+          </tr>
+        </thead>
+        <tbody id="audit-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───── TOOLS ───── -->
+  <section id="view-tools" class="view p-6 fade-in hidden">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-white">Tool Registry</h1>
+      <p class="text-slate-400 text-sm mt-1">Available tools agents can request from the coordinator</p>
+    </div>
+    <div id="tools-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </section>
+
+  <!-- ───── HEALTH ───── -->
+  <section id="view-health" class="view p-6 fade-in hidden">
+    <div class="mb-6">
+      <h1 class="text-2xl font-bold text-white">System Health</h1>
+      <p class="text-slate-400 text-sm mt-1">Runtime environment diagnostics</p>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card">
+        <div class="text-sm font-semibold text-white mb-4">Core Components</div>
+        <div id="health-core" class="space-y-3"></div>
+      </div>
+      <div class="card">
+        <div class="text-sm font-semibold text-white mb-4">Configuration</div>
+        <div id="health-config" class="space-y-3"></div>
+      </div>
+      <div class="card lg:col-span-2">
+        <div class="text-sm font-semibold text-white mb-4">API Key Status</div>
+        <div id="health-keys" class="flex gap-4 flex-wrap"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+//  STATE
+// ─────────────────────────────────────────────────────────────────────────────
+const state = {
+  currentView: 'dashboard',
+  refreshInterval: null,
+  sseSource: null,
+  currentRunId: null,
+  allAgents: [],
+};
+
+const PIPELINE = [
+  'ingest_task', 'decompose_task', 'execute_task_pool',
+  'validate_outputs', 'update_registry_and_audit', 'synthesize_final_response'
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  UTILS
+// ─────────────────────────────────────────────────────────────────────────────
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function fmtTime(ts) {
+  if (!ts) return '–';
+  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+function fmtMs(ms) {
+  if (ms == null) return '–';
+  return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms/1000).toFixed(2) + 's';
+}
+function shortId(id) {
+  return id ? id.slice(0, 12) + '…' : '–';
+}
+function statusBadge(s) {
+  const map = {
+    ok: 'badge-green', active: 'badge-green',
+    completed: 'badge-green', true: 'badge-green',
+    failed: 'badge-red', error: 'badge-red', denied: 'badge-red', false: 'badge-red',
+    in_progress: 'badge-blue', running: 'badge-blue',
+    pending: 'badge-yellow', waiting: 'badge-yellow',
+    approval_decision: 'badge-teal',
+  };
+  const cls = map[String(s).toLowerCase()] || 'badge-gray';
+  return `<span class="badge ${cls}">${esc(s)}</span>`;
+}
+function checkRow(label, ok, note = '') {
+  return `<div class="flex items-center justify-between py-2 border-b border-slate-700/40 last:border-0">
+    <span class="text-sm text-slate-300">${esc(label)}</span>
+    <div class="flex items-center gap-2">
+      ${note ? `<span class="text-xs text-slate-500">${esc(note)}</span>` : ''}
+      ${ok ? '<span class="w-2 h-2 rounded-full bg-emerald-400"></span>' : '<span class="w-2 h-2 rounded-full bg-red-400"></span>'}
+    </div>
+  </div>`;
+}
+
+async function api(path) {
+  try {
+    const r = await fetch(path);
+    if (!r.ok) return null;
+    return r.json();
+  } catch { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NAVIGATION
+// ─────────────────────────────────────────────────────────────────────────────
+function nav(el) {
+  const view = el.dataset.view;
+  if (!view) return;
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
+  el.classList.add('active');
+  $(`view-${view}`).classList.remove('hidden');
+  state.currentView = view;
+  refresh();
+}
+
+function navTo(view, payload) {
+  // find nav item or synthesise
+  const el = document.querySelector(`[data-view="${view}"]`) || { dataset: { view } };
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
+  $(`view-${view}`).classList.remove('hidden');
+  state.currentView = view;
+  if (payload) state[`${view}Payload`] = payload;
+  loadView(view, payload);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  REFRESH LOOP
+// ─────────────────────────────────────────────────────────────────────────────
+function startRefresh() {
+  refresh();
+  state.refreshInterval = setInterval(() => {
+    // only auto-refresh non-detail views
+    if (!['agent-detail','run-detail'].includes(state.currentView)) refresh();
+  }, 8000);
+}
+
+function refresh() {
+  const view = state.currentView;
+  const loaders = {
+    dashboard: loadDashboard,
+    agents: loadAgents,
+    runs: loadRuns,
+    audit: loadAudit,
+    tools: loadTools,
+    health: loadHealth,
+  };
+  const fn = loaders[view];
+  if (fn) fn();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  const [stats, runs, audit] = await Promise.all([
+    api('/api/stats'), api('/api/runs?limit=8'), api('/api/audit?limit=8')
+  ]);
+  if (stats) {
+    $('stat-agents').textContent = stats.agents;
+    $('stat-runs').textContent   = stats.runs;
+    $('stat-rate').textContent   = stats.success_rate + '%';
+    $('stat-logs').textContent   = stats.run_logs;
+  }
+  // pipeline
+  $('pipeline-nodes').innerHTML = PIPELINE.map((n, i) => `
+    <div class="flex items-center">
+      ${i > 0 ? '<div class="w-6 h-px bg-teal-700/60 mx-1"></div>' : ''}
+      <div class="px-2.5 py-1.5 rounded-md bg-slate-700/60 border border-slate-600/60 text-xs text-teal-300 font-mono whitespace-nowrap">${esc(n)}</div>
+    </div>
+  `).join('');
+
+  // recent runs
+  $('dash-runs-table').innerHTML = renderRunsTable(runs?.slice(0,8) || [], true);
+  // recent audit
+  $('dash-audit-table').innerHTML = renderAuditTable(audit?.slice(0,8) || [], true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AGENTS
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadAgents() {
+  const agents = await api('/api/agents?limit=500');
+  state.allAgents = agents || [];
+  renderAgentsTable(state.allAgents);
+}
+
+function filterAgents() {
+  const q = $('agent-search').value.toLowerCase();
+  const filtered = state.allAgents.filter(a =>
+    (a.name||'').toLowerCase().includes(q) ||
+    (a.description||'').toLowerCase().includes(q) ||
+    (a.agent_id||'').toLowerCase().includes(q)
+  );
+  renderAgentsTable(filtered);
+}
+
+function renderAgentsTable(agents) {
+  $('agents-tbody').innerHTML = agents.map(a => `
+    <tr class="tbl-row">
+      <td class="tbl-cell">
+        <div class="font-medium text-white">${esc(a.name || a.agent_id)}</div>
+        <div class="text-xs text-slate-500 font-mono">${esc(a.agent_id)}</div>
+        <div class="text-xs text-slate-400 mt-0.5 max-w-xs truncate">${esc(a.description || '')}</div>
+      </td>
+      <td class="tbl-cell">${statusBadge(a.status)}</td>
+      <td class="tbl-cell"><div class="flex flex-wrap gap-1">${renderTags(JSON.parse(a.tags||'[]'))}</div></td>
+      <td class="tbl-cell"><div class="flex flex-wrap gap-1">${renderTags(JSON.parse(a.tools_allowlist||'[]'), 'teal')}</div></td>
+      <td class="tbl-cell text-center">${a.usage_count ?? 0}</td>
+      <td class="tbl-cell">${a.success_rate != null ? Math.round(a.success_rate*100)+'%' : '–'}</td>
+      <td class="tbl-cell text-xs">${fmtTime(a.last_used_at)}</td>
+      <td class="tbl-cell">
+        <button class="btn btn-ghost text-xs" onclick="openAgentDetail('${esc(a.agent_id)}')">View</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="8" class="tbl-cell text-center text-slate-500 py-8">No agents registered yet.</td></tr>';
+}
+
+function renderTags(tags, color = 'default') {
+  if (!Array.isArray(tags)) return '';
+  return tags.map(t => `<span class="badge ${color === 'teal' ? 'badge-teal' : 'badge-gray'} text-xs">${esc(t)}</span>`).join('');
+}
+
+async function openAgentDetail(agentId) {
+  navTo('agent-detail');
+  const agent = await api(`/api/agents/${encodeURIComponent(agentId)}`);
+  if (!agent) { $('detail-agent-name').textContent = 'Not found'; return; }
+  $('detail-agent-name').textContent = agent.name || agent.agent_id;
+  $('detail-agent-id').textContent = agent.agent_id;
+
+  $('detail-meta-card').innerHTML = `
+    <div class="text-sm font-semibold text-white mb-3">Metadata</div>
+    <dl class="space-y-2 text-xs">
+      ${metaRow('Status', statusBadge(agent.status))}
+      ${metaRow('Version', agent.version)}
+      ${metaRow('Created', fmtTime(agent.created_at))}
+      ${metaRow('Last Used', fmtTime(agent.last_used_at))}
+      ${metaRow('Uses', agent.usage_count)}
+      ${metaRow('Success', agent.success_count)}
+      ${metaRow('Failures', agent.failure_count)}
+      ${metaRow('Avg Latency', fmtMs(agent.avg_latency_ms))}
+      ${metaRow('Embedding Model', agent.embedding_model)}
+    </dl>`;
+
+  $('detail-tools-card').innerHTML = `
+    <div class="text-sm font-semibold text-white mb-3">Allowed Tools</div>
+    <div class="flex flex-wrap gap-1.5">
+      ${(agent.tools_allowlist||[]).map(t => `<span class="badge badge-teal">${esc(t)}</span>`).join('') || '<span class="text-slate-500 text-xs">None configured</span>'}
+    </div>
+    <div class="text-sm font-semibold text-white mt-4 mb-3">Tags</div>
+    <div class="flex flex-wrap gap-1.5">
+      ${(agent.tags||[]).map(t => `<span class="badge badge-gray">${esc(t)}</span>`).join('') || '<span class="text-slate-500 text-xs">None</span>'}
+    </div>
+    ${agent.api_capabilities?.length ? `
+    <div class="text-sm font-semibold text-white mt-4 mb-3">API Capabilities</div>
+    <div class="flex flex-wrap gap-1.5">
+      ${agent.api_capabilities.map(t => `<span class="badge badge-blue">${esc(t)}</span>`).join('')}
+    </div>` : ''}`;
+
+  $('detail-skill-card').innerHTML = agent.skill_md ? `
+    <div class="text-sm font-semibold text-white mb-3">Skill Definition</div>
+    <div class="bg-slate-900 rounded-lg p-3 text-xs text-slate-300 font-mono whitespace-pre-wrap overflow-auto max-h-64">${esc(agent.skill_md)}</div>
+  ` : `
+    <div class="text-sm font-semibold text-white mb-3">Description</div>
+    <div class="text-sm text-slate-300">${esc(agent.description || '–')}</div>`;
+
+  $('detail-runs-card').innerHTML = `
+    <div class="text-sm font-semibold text-white mb-3">Requires Approval For</div>
+    <div class="flex flex-wrap gap-1.5">
+      ${(agent.requires_approval_for||[]).map(t => `<span class="badge badge-yellow">${esc(t)}</span>`).join('') || '<span class="text-slate-500 text-xs">Nothing requiring approval</span>'}
+    </div>`;
+}
+
+function metaRow(label, val) {
+  return `<div class="flex justify-between gap-2"><dt class="text-slate-500">${esc(label)}</dt><dd class="text-slate-200 text-right">${val}</dd></div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RUNS
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadRuns() {
+  const runs = await api('/api/runs?limit=200');
+  $('runs-tbody').innerHTML = renderRunsTable(runs || [], false);
+}
+
+function renderRunsTable(runs, compact = false) {
+  if (!runs.length) return compact
+    ? '<div class="text-slate-500 text-xs py-4 text-center">No runs yet.</div>'
+    : '<tr><td colspan="7" class="tbl-cell text-center text-slate-500 py-8">No runs yet.</td></tr>';
+  if (compact) {
+    return `<table class="w-full"><tbody>${runs.map(r => `
+      <tr class="tbl-row">
+        <td class="tbl-cell py-2">
+          <div class="font-mono text-xs text-slate-400">${esc(shortId(r.run_id))}</div>
+          <div class="text-xs text-slate-300 max-w-xs truncate">${esc(r.task||'')}</div>
+        </td>
+        <td class="tbl-cell py-2">${statusBadge(r.status)}</td>
+        <td class="tbl-cell py-2 text-xs">${fmtTime(r.created_at)}</td>
+        <td class="tbl-cell py-2"><button class="btn btn-ghost text-xs" onclick="openRunDetail('${esc(r.run_id)}')">View</button></td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+  return runs.map(r => `
+    <tr class="tbl-row">
+      <td class="tbl-cell font-mono text-xs">${esc(shortId(r.run_id))}</td>
+      <td class="tbl-cell max-w-xs"><div class="truncate">${esc(r.task||'')}</div></td>
+      <td class="tbl-cell font-mono text-xs text-slate-400">${esc(shortId(r.agent_id))}</td>
+      <td class="tbl-cell">${statusBadge(r.status)}</td>
+      <td class="tbl-cell">${fmtMs(r.latency_ms)}</td>
+      <td class="tbl-cell text-xs">${fmtTime(r.created_at)}</td>
+      <td class="tbl-cell"><button class="btn btn-ghost text-xs" onclick="openRunDetail('${esc(r.run_id)}')">View</button></td>
+    </tr>`).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RUN DETAIL
+// ─────────────────────────────────────────────────────────────────────────────
+async function openRunDetail(runId) {
+  state.currentRunId = runId;
+  navTo('run-detail');
+
+  // stop any existing SSE
+  if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
+
+  $('run-detail-id').textContent = runId;
+  $('run-detail-task').textContent = '';
+  $('run-detail-status').innerHTML = '';
+  $('run-task-pool').innerHTML = '<div class="text-slate-500">Loading…</div>';
+  $('run-log-box').innerHTML = '';
+  $('run-tool-calls').innerHTML = '<div class="text-slate-500 text-xs">No tool calls recorded.</div>';
+
+  // get run meta from runs list
+  const runs = await api('/api/runs?limit=10000');
+  const run = (runs||[]).find(r => r.run_id === runId);
+  if (run) {
+    $('run-detail-task').textContent = run.task || '';
+    $('run-detail-status').innerHTML = statusBadge(run.status);
+  }
+
+  // load existing log
+  const log = await api(`/api/runlog/${encodeURIComponent(runId)}?tail=2000`);
+  renderRunLog(log || []);
+
+  // start SSE
+  startRunSSE(runId);
+}
+
+function renderRunLog(events) {
+  const box = $('run-log-box');
+  const taskPoolEvents = events.filter(e => e.event === 'task_pool_update');
+  const toolCallEvents = events.filter(e => e.event === 'tool_call');
+
+  // task pool: use last snapshot
+  if (taskPoolEvents.length) {
+    const last = taskPoolEvents[taskPoolEvents.length - 1];
+    renderTaskPool((last.payload?.tasks) || []);
+  } else {
+    $('run-task-pool').innerHTML = '<div class="text-slate-500 text-xs">No task pool data yet.</div>';
+  }
+
+  // tool calls
+  if (toolCallEvents.length) {
+    $('run-tool-calls').innerHTML = toolCallEvents.map(e => {
+      const p = e.payload || {};
+      return `<div class="bg-slate-700/30 rounded-lg px-3 py-2 text-xs flex items-start gap-3">
+        <span class="badge ${p.ok ? 'badge-green' : 'badge-red'} mt-0.5">${p.ok ? 'OK' : 'FAIL'}</span>
+        <div class="flex-1">
+          <span class="text-teal-300 font-semibold">${esc(p.tool||'?')}</span>
+          <span class="text-slate-400 ml-2">agent: ${esc(p.agent_id||'–')}</span>
+          ${p.reason ? `<div class="text-slate-400 mt-0.5">${esc(p.reason)}</div>` : ''}
+        </div>
+        <span class="text-slate-600 text-xs">${fmtTime(e.ts)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // render log lines (non-task-pool)
+  const lines = events.filter(e => e.event !== 'task_pool_update');
+  box.innerHTML = lines.map(e => renderLogLine(e)).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderLogLine(e) {
+  const colorMap = {
+    task_start: 'text-teal-300', task_end: 'text-emerald-300',
+    tool_call: 'text-yellow-300', error: 'text-red-400',
+    approval_request: 'text-orange-300', approval_decision: 'text-blue-300',
+    agent_response: 'text-purple-300',
+  };
+  const color = colorMap[e.event] || 'text-slate-400';
+  const ts = e.ts ? new Date(e.ts).toISOString().slice(11, 23) : '';
+  return `<div class="log-line ${color} hover:bg-slate-800/50 px-1 rounded">
+    <span class="text-slate-600">${esc(ts)}</span>
+    <span class="text-slate-500 mx-1">│</span>
+    <span class="font-semibold">${esc(e.event||'')}</span>
+    <span class="text-slate-500 ml-2">${esc(JSON.stringify(e.payload||{}).slice(0,180))}</span>
+  </div>`;
+}
+
+function renderTaskPool(tasks) {
+  if (!tasks.length) {
+    $('run-task-pool').innerHTML = '<div class="text-slate-500 text-xs">No subtasks decomposed yet.</div>';
+    return;
+  }
+  $('run-task-pool').innerHTML = tasks.map(t => {
+    const cls = `task-${t.status || 'waiting'}`;
+    const deps = (t.depends_on||[]).join(', ') || '–';
+    return `<div class="task-card ${cls}">
+      <div class="flex items-center justify-between gap-2 mb-1">
+        <span class="font-semibold">${esc(t.title || t.task_id)}</span>
+        <span class="badge ${taskBadge(t.status)}">${esc(t.status||'?')}</span>
+      </div>
+      <div class="flex gap-4 text-slate-500">
+        <span>tag: <span class="text-slate-300">${esc(t.role_tag||'–')}</span></span>
+        <span>deps: <span class="text-slate-300">${esc(deps)}</span></span>
+        ${t.assigned_agent_id ? `<span>agent: <span class="text-slate-300">${esc(t.assigned_agent_id.slice(0,12))}</span></span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function taskBadge(s) {
+  const m = { completed:'badge-green', failed:'badge-red', in_progress:'badge-blue', pending:'badge-yellow', waiting:'badge-gray' };
+  return m[s] || 'badge-gray';
+}
+
+function startRunSSE(runId) {
+  if (typeof EventSource === 'undefined') return;
+  const src = new EventSource(`/api/runlog/${encodeURIComponent(runId)}/stream`);
+  state.sseSource = src;
+  const box = $('run-log-box');
+
+  src.onmessage = (e) => {
+    let event;
+    try { event = JSON.parse(e.data); } catch { return; }
+    if (event.event === 'stream_end') { src.close(); $('run-log-live').innerHTML = '<span class="text-slate-500 text-xs">ended</span>'; return; }
+    if (event.event === 'task_pool_update') {
+      renderTaskPool((event.payload?.tasks) || []);
+      return;
+    }
+    if (event.event === 'tool_call') {
+      const existing = $('run-tool-calls').querySelector('.text-slate-500');
+      if (existing) existing.remove();
+      const p = event.payload || {};
+      const div = document.createElement('div');
+      div.className = 'bg-slate-700/30 rounded-lg px-3 py-2 text-xs flex items-start gap-3';
+      div.innerHTML = `<span class="badge ${p.ok ? 'badge-green' : 'badge-red'} mt-0.5">${p.ok ? 'OK' : 'FAIL'}</span>
+        <div class="flex-1"><span class="text-teal-300 font-semibold">${esc(p.tool||'?')}</span>
+        <span class="text-slate-400 ml-2">agent: ${esc(p.agent_id||'–')}</span>
+        ${p.reason ? `<div class="text-slate-400 mt-0.5">${esc(p.reason)}</div>` : ''}</div>
+        <span class="text-slate-600 text-xs">${fmtTime(event.ts)}</span>`;
+      $('run-tool-calls').appendChild(div);
+    }
+    const line = document.createElement('div');
+    line.innerHTML = renderLogLine(event);
+    box.appendChild(line.firstChild);
+    box.scrollTop = box.scrollHeight;
+  };
+  src.onerror = () => {
+    $('run-log-live').innerHTML = '<span class="text-slate-500 text-xs">disconnected</span>';
+    src.close();
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AUDIT
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadAudit() {
+  const events = await api('/api/audit?limit=200');
+  $('audit-tbody').innerHTML = renderAuditTable(events || [], false);
+}
+
+function renderAuditTable(events, compact = false) {
+  if (!events.length) return compact
+    ? '<div class="text-slate-500 text-xs py-4 text-center">No audit events yet.</div>'
+    : '<tr><td colspan="6" class="tbl-cell text-center text-slate-500 py-8">No audit events yet.</td></tr>';
+
+  if (compact) {
+    return `<table class="w-full"><tbody>${events.map(e => `
+      <tr class="tbl-row">
+        <td class="tbl-cell py-2">${statusBadge(e.event_type)}</td>
+        <td class="tbl-cell py-2 text-xs font-mono text-slate-400 max-w-xs truncate">${esc(e.agent_id || '–')}</td>
+        <td class="tbl-cell py-2 text-xs">${fmtTime(e.created_at)}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  return events.map(e => {
+    let payload = '';
+    try { payload = JSON.stringify(e.payload||{}, null, 0).slice(0,100); } catch {}
+    return `
+    <tr class="tbl-row">
+      <td class="tbl-cell text-xs text-slate-500">${e.id}</td>
+      <td class="tbl-cell">${statusBadge(e.event_type)}</td>
+      <td class="tbl-cell font-mono text-xs text-slate-400">${esc(shortId(e.run_id))}</td>
+      <td class="tbl-cell font-mono text-xs text-slate-400">${esc(shortId(e.agent_id))}</td>
+      <td class="tbl-cell max-w-xs"><div class="truncate text-xs text-slate-400 font-mono">${esc(payload)}</div></td>
+      <td class="tbl-cell text-xs">${fmtTime(e.created_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+const TOOL_ICONS = {
+  terminal: '⌨️', http_api: '🌐', web_fetch: '🔍', file_io: '📁', python_exec: '🐍', sql_query: '🗄️'
+};
+
+async function loadTools() {
+  const tools = await api('/api/tools');
+  $('tools-grid').innerHTML = (tools||[]).map(t => `
+    <div class="card hover:border-teal-700/60 transition-colors">
+      <div class="flex items-center gap-3 mb-3">
+        <span class="text-2xl">${TOOL_ICONS[t.name] || '🔧'}</span>
+        <div>
+          <div class="font-semibold text-white font-mono">${esc(t.name)}</div>
+          <div class="text-xs text-teal-400">Available to agents</div>
+        </div>
+      </div>
+      <p class="text-sm text-slate-300 mb-3">${esc(t.description)}</p>
+      ${t.args_schema ? `<div class="bg-slate-900 rounded-lg p-2.5">
+        <div class="text-xs text-slate-500 mb-1.5 font-semibold uppercase tracking-wider">Arguments</div>
+        ${Object.entries(t.args_schema||{}).map(([k,v]) =>
+          `<div class="text-xs flex justify-between gap-2 py-0.5 border-b border-slate-700/40 last:border-0">
+            <span class="text-teal-300 font-mono">${esc(k)}</span>
+            <span class="text-slate-400">${esc(v)}</span>
+          </div>`
+        ).join('')}
+      </div>` : ''}
+    </div>`).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HEALTH
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadHealth() {
+  const h = await api('/api/health');
+  if (!h) { $('health-core').innerHTML = '<div class="text-red-400 text-sm">API unreachable</div>'; return; }
+
+  $('health-core').innerHTML = [
+    checkRow('Database exists', h.db_exists, h.db_exists ? '' : 'run: python -m closed_claw.cli init'),
+    checkRow('Agents directory', h.agents_dir_exists),
+    checkRow('Run logs directory', h.run_logs_dir_exists),
+    checkRow('LangGraph loaded', h.langgraph_ok, h.langgraph_ok ? '' : 'pip install langgraph'),
+    checkRow('sqlite-vec loaded', h.sqlite_vec_ok, h.sqlite_vec_ok ? '' : 'pip install sqlite-vec'),
+  ].join('');
+
+  $('health-config').innerHTML = [
+    checkRow('LLM Provider', true, h.llm_provider),
+    checkRow('LLM Model', true, h.llm_model),
+    checkRow('Embedding Model', true, h.embedding_model),
+    checkRow(`Embedding Dim`, true, h.embedding_dim),
+    checkRow('sqlite-vec required', !h.require_sqlite_vec || h.sqlite_vec_ok, h.require_sqlite_vec ? 'required' : 'optional'),
+  ].join('');
+
+  $('health-keys').innerHTML = [
+    { label: 'OpenAI', key: 'openai_key_set', val: h.openai_key_set },
+    { label: 'Gemini', key: 'gemini_key_set', val: h.gemini_key_set },
+    { label: 'Anthropic', key: 'anthropic_key_set', val: h.anthropic_key_set },
+  ].map(({ label, val }) => `
+    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700/40 border ${val ? 'border-emerald-700/40' : 'border-slate-600/40'}">
+      <span class="w-2 h-2 rounded-full ${val ? 'bg-emerald-400' : 'bg-slate-500'}"></span>
+      <span class="text-sm text-slate-300">${esc(label)}</span>
+      <span class="text-xs ${val ? 'text-emerald-400' : 'text-slate-500'}">${val ? 'set' : 'not set'}</span>
+    </div>`).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VIEW LOADER (for navTo with no sidebar item)
+// ─────────────────────────────────────────────────────────────────────────────
+function loadView(view) {
+  const loaders = { 'agent-detail': ()=>{}, 'run-detail': ()=>{} };
+  // agent-detail and run-detail are loaded via openAgentDetail / openRunDetail
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BOOT
+// ─────────────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  startRefresh();
+  // refresh indicator pulse
+  setInterval(() => {
+    const dot = $('refresh-dot');
+    dot.style.opacity = '0.3';
+    setTimeout(() => dot.style.opacity = '1', 400);
+  }, 8000);
+});
+</script>
+</body>
+</html>

@@ -34,6 +34,8 @@ def run_setup_wizard(env_path: Path | None = None) -> SetupResult:
         updates["GEMINI_API_KEY"] = key
     elif provider == "claude":
         updates["ANTHROPIC_API_KEY"] = key
+    elif provider == "siemens":
+        updates["SIEMENS_API_KEY"] = key
 
     verified, message = verify_provider(provider=provider, model=model, api_key=key)
 
@@ -63,6 +65,8 @@ def verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]
             return _verify_gemini(model, api_key)
         if provider == "claude":
             return _verify_claude(model, api_key)
+        if provider == "siemens":
+            return _verify_siemens(model, api_key)
         return False, f"unsupported provider: {provider}"
     except Exception as exc:
         return False, str(exc)
@@ -133,9 +137,32 @@ def _verify_claude(model: str, api_key: str) -> tuple[bool, str]:
     return True, "claude request succeeded"
 
 
+def _verify_siemens(model: str, api_key: str) -> tuple[bool, str]:
+    """Run verify siemens."""
+    import httpx
+
+    with httpx.Client(timeout=20) as client:
+        resp = client.post(
+            "https://api.siemens.com/llm/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK"}],
+                "temperature": 0,
+                "max_tokens": 8,
+            },
+        )
+    if resp.status_code >= 400:
+        return False, f"siemens HTTP {resp.status_code}: {resp.text[:160]}"
+    return True, "siemens request succeeded"
+
+
 def _choose_provider() -> str:
     """Run choose provider."""
-    options = ["heuristic", "openai", "gemini", "claude"]
+    options = ["heuristic", "openai", "gemini", "claude", "siemens"]
     print("Choose LLM provider:")
     for idx, item in enumerate(options, start=1):
         print(f"  {idx}. {item}")
@@ -153,6 +180,7 @@ def _choose_model(provider: str) -> str:
         "openai": "gpt-4o-mini",
         "gemini": "gemini-1.5-flash",
         "claude": "claude-3-5-haiku-latest",
+        "siemens": "qwen3-30b-a3b-instruct-2507",
     }
     default = default_models.get(provider, "local-heuristic")
     raw = input(f"Model [{default}]: ").strip()

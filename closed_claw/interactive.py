@@ -24,7 +24,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         print("11) Delete Agent")
         print("12) Delete All Agents")
         print("13) Stop Run Loop (graceful)")
-        print("14) Exit")
+        print("14) Web Dashboard")
+        print("15) Exit")
 
         choice = _safe_input("Choose an option: ")
         if choice is None:
@@ -70,6 +71,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         elif choice == "13":
             _cancel_run_interactive(handlers)
         elif choice == "14":
+            handlers["web"](Namespace(host="127.0.0.1", port=7860))
+        elif choice == "15":
             print("Goodbye.")
             return 0
         else:

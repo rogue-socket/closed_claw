@@ -1,99 +1,200 @@
 # Quickstart
 
-This is the fastest way to run Closed Claw locally.
+Fastest path to running Closed Claw locally.
 
-## 1) Setup
+---
+
+## 1) Environment Setup
 
 ```bash
+# Option A: conda (recommended)
 conda create -n closed_claw python=3.11 -y
 conda activate closed_claw
-cd /Users/yashagrawal/Documents/closed_claw/closed_claw
+
+# Option B: venv
+python3.11 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
+```
+
+---
+
+## 2) Configure
+
+```bash
 cp .env.example .env
 ```
 
-## 2) Initialize
+Edit `.env` if you want a real LLM provider. Defaults use `heuristic` (fully local, no API key needed).
+
+Or use the interactive setup wizard:
+
+```bash
+python -m closed_claw.cli setup
+```
+
+The wizard prompts for provider → model → API key → runs a live verification → saves `.env`.
+
+---
+
+## 3) Initialize
 
 ```bash
 python -m closed_claw.cli init
 python -m closed_claw.cli doctor
 ```
 
-Expected: `doctor` should report `langgraph_ok: true` and ideally `sqlite_vec_ok: true`.
+`doctor` should report `langgraph_ok: true`. `sqlite_vec_ok: true` is optional but enables semantic agent search.
 
-## 3) Run a Task
+---
 
-Interactive mode:
+## 4) Run a Task
 
-```bash
-python -m closed_claw.cli run "please use paid_api for analysis"
-```
-
-Interactive launcher:
+### Interactive menu (recommended for first use)
 
 ```bash
 python -m closed_claw.cli
 ```
 
-This opens the main menu (with startup art shown once) with setup/init/doctor/run/list options.
-You can also delete an agent from the menu.
+Opens a Rich menu with setup / init / doctor / run / inspect options.
 
-Setup wizard directly:
+### Direct run
 
 ```bash
-python -m closed_claw.cli setup
+python -m closed_claw.cli run "summarize the files in this folder"
 ```
 
-Wizard validates provider connectivity before saving.
-
-Non-interactive mode (useful for scripts/CI):
+### Non-interactive (scripts / CI)
 
 ```bash
-python -m closed_claw.cli run "please use paid_api for analysis" \
+python -m closed_claw.cli run "your task here" \
   --create-approval-mode approve \
   --api-approval-mode approve
 ```
 
-Use an LLM reranker provider (optional):
+### With a real LLM provider
 
 ```bash
-export OPENAI_API_KEY=\"<your_key>\"
-python -m closed_claw.cli run \"please use paid_api for analysis\" \
+export OPENAI_API_KEY="sk-..."
+python -m closed_claw.cli run "your task here" \
+  --create-approval-mode approve \
+  --api-approval-mode approve \
   --llm-provider openai \
   --llm-model gpt-4o-mini
 ```
 
-## 4) Inspect Results
+---
+
+## 5) Inspect Results
 
 ```bash
+# List agents created so far
 python -m closed_claw.cli agents --limit 20
-python -m closed_claw.cli runs --limit 20
-python -m closed_claw.cli audit --limit 20
-python -m closed_claw.cli runlog <run_id> --tail 200
-python -m closed_claw.cli tools
-python -m closed_claw.cli tools --agent-id <agent_id>
+
+# Full detail on one agent (manifest + skill.md + memory)
 python -m closed_claw.cli agent <agent_id>
-python -m closed_claw.cli delete-agent <agent_id>
-python -m closed_claw.cli delete-all-agents
+
+# Run history
+python -m closed_claw.cli runs --limit 20
+
+# Audit trail
+python -m closed_claw.cli audit --limit 20
+
+# Live JSONL events for a specific run
+python -m closed_claw.cli runlog <run_id> --tail 200
+
+# Supported tools
+python -m closed_claw.cli tools
+
+# Tools for a specific agent
+python -m closed_claw.cli tools --agent-id <agent_id>
 ```
 
-## 5) Run Tests
+---
+
+## 6) Manage Agents
+
+```bash
+# Delete one agent
+python -m closed_claw.cli delete-agent <agent_id>
+python -m closed_claw.cli delete-agent <agent_id> --yes   # skip confirmation
+
+# Delete all agents (reset)
+python -m closed_claw.cli delete-all-agents
+python -m closed_claw.cli delete-all-agents --yes
+```
+
+---
+
+## 7) Run Tests
 
 ```bash
 pytest -q
 ```
 
+---
+
 ## Common Fixes
 
-If sqlite-vec fails:
+### sqlite-vec not loading
 
 ```bash
 export SQLITE_VEC_PATH="$(python -c 'import sqlite_vec; print(sqlite_vec.loadable_path())')"
 python -m closed_claw.cli doctor
 ```
 
-If you want fully local/offline deterministic embeddings:
+Or disable the requirement entirely:
+
+```bash
+CLOSED_CLAW_REQUIRE_SQLITE_VEC=false python -m closed_claw.cli doctor
+```
+
+### Slow startup (sentence-transformers model download)
+
+Disable neural embeddings (uses zero-vector instead — still works, no semantic search):
 
 ```bash
 export CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS=false
 ```
+
+### Interactive prompt blocks automation
+
+Override approval policy:
+
+```bash
+--create-approval-mode approve --api-approval-mode approve
+```
+
+### Organizing files in a folder
+
+```bash
+python -m closed_claw.cli run "organize files in /absolute/path/to/folder by file type" \
+  --create-approval-mode approve \
+  --api-approval-mode approve
+```
+
+The agent executes this using `file_io` and `terminal` tools from its `tools_allowlist`.
+
+---
+
+## Key Env Vars Reference
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
+| `CLOSED_CLAW_LLM_PROVIDER` | `heuristic` | `heuristic \| openai \| gemini \| claude` |
+| `CLOSED_CLAW_LLM_MODEL` | provider default | Model ID string |
+| `CLOSED_CLAW_CREATE_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
+| `CLOSED_CLAW_API_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
+| `CLOSED_CLAW_DB_PATH` | `.closed_claw/registry.db` | SQLite registry path |
+| `CLOSED_CLAW_AGENTS_DIR` | `agents` | Agent capsule root dir |
+| `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` | _(empty)_ | Comma-separated absolute paths for tool sandboxing |
+| `OPENAI_API_KEY` | _(empty)_ | OpenAI key |
+| `GEMINI_API_KEY` | _(empty)_ | Gemini key |
+| `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic key |
+
+Full list in `.env.example` and `closed_claw/config.py`.

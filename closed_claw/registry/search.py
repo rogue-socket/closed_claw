@@ -73,7 +73,7 @@ class LLMReranker:
 
     def _call_provider(self, task: str, candidates: list[SearchCandidate]) -> str:
         """Run call provider."""
-        if self.provider == "openai":
+        if self.provider in ("openai", "siemens"):
             return self._call_openai(task, candidates)
         if self.provider == "gemini":
             return self._call_gemini(task, candidates)
@@ -282,6 +282,9 @@ def build_reranker(settings: Settings) -> RerankerProtocol:
     elif provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         base = settings.anthropic_base_url
+    elif provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        base = settings.siemens_base_url
     else:
         return HeuristicReranker()
 
@@ -316,6 +319,9 @@ def generate_agent_description(settings: Settings, task: str) -> str:
     elif provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         base = settings.anthropic_base_url.rstrip("/")
+    elif provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        base = settings.siemens_base_url.rstrip("/")
     else:
         return heuristic
     if not key:
@@ -329,7 +335,7 @@ def generate_agent_description(settings: Settings, task: str) -> str:
     try:
         import httpx
 
-        if provider == "openai":
+        if provider in ("openai", "siemens"):
             url = f"{base}/v1/chat/completions"
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
             body = {
@@ -483,6 +489,9 @@ def _provider_key_and_base(settings: Settings, provider: str) -> tuple[str, str]
     if provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         return key, settings.anthropic_base_url.rstrip("/")
+    if provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        return key, settings.siemens_base_url.rstrip("/")
     return "", ""
 
 
@@ -500,7 +509,7 @@ def _generate_text_with_provider(
     """Run generate text with provider."""
     import httpx
 
-    if provider == "openai":
+    if provider in ("openai", "siemens"):
         with httpx.Client(timeout=timeout_sec) as client:
             resp = client.post(
                 f"{base_url}/v1/chat/completions",

@@ -1,19 +1,56 @@
+# Secrets / local config
 .env
+
+# Runtime data
 .closed_claw/
+
+# Agent capsules (generated at runtime)
 agents/
+
+# Temporary test directories
 test_folder/
-test_folder2/
-test_folder3/
-.pytest_cache/
+test_folder*/
+
+# Python cache
 __pycache__/
 *.pyc
-.coverage
-htmlcov/
+*.pyo
+*.pyd
+.pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.DS_Store
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# SQLite databases (runtime state)
+*.db
+
+# Logs
 *.log
-.idea/
-.vscode/
+
+# Virtual environments
+# Handles both a top-level venv and the venv created inside the closed_claw/ package dir
 .venv/
 venv/
+closed_claw/Lib/
+closed_claw/Scripts/
+closed_claw/Include/
+closed_claw/share/
+closed_claw/pyvenv.cfg
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

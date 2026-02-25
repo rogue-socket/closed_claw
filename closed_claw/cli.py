@@ -501,6 +501,18 @@ def cmd_delete_agent(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Launch the Closed Claw web dashboard."""
+    from closed_claw.web.server import run_server
+
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    port = getattr(args, "port", 7860) or 7860
+    print(f"Starting Closed Claw dashboard at http://{host}:{port}")
+    print("Press Ctrl+C to stop.")
+    run_server(host=host, port=port)
+    return 0
+
+
 def cmd_delete_all_agents(args: argparse.Namespace) -> int:
     """Run cmd delete all agents."""
     settings = Settings.from_env()
@@ -608,6 +620,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_menu = sub.add_parser("menu", help="Open interactive main menu")
     p_menu.set_defaults(func=None)
 
+    p_web = sub.add_parser("web", help="Launch the web dashboard UI")
+    p_web.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    p_web.add_argument("--port", type=int, default=7860, help="Port to bind (default: 7860)")
+    p_web.set_defaults(func=cmd_web)
+
     return parser
 
 
@@ -630,6 +647,7 @@ def main() -> int:
         "tools": cmd_tools,
         "delete_agent": cmd_delete_agent,
         "delete_all_agents": cmd_delete_all_agents,
+        "web": cmd_web,
     }
 
     if not getattr(args, "command", None) or args.command == "menu":

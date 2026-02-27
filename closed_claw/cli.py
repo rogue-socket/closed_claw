@@ -295,7 +295,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         import sqlite3
         conn = sqlite3.connect(memory_db)
         try:
-            row = conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM memory").fetchone()
             memory_count = int(row[0]) if row else 0
         except Exception:
             memory_count = None

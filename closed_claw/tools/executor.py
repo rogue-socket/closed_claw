@@ -106,8 +106,13 @@ class ToolExecutor:
         normalized: dict[str, Any] = {}
         for key, value in args.items():
             canonical = aliases.get(key, key)
-            # Don't overwrite an already-present canonical key
+            # Detect duplicate: two keys mapping to the same canonical name
             if canonical in normalized:
+                import logging
+                logging.getLogger("closed_claw.tools").warning(
+                    "Tool '%s': arg '%s' maps to canonical '%s' which is already set — ignoring duplicate",
+                    tool, key, canonical,
+                )
                 continue
             normalized[canonical] = value
         return normalized
@@ -303,7 +308,8 @@ class ToolExecutor:
             raise ToolExecutionError("sql_query only allows SELECT statements")
         params = args.get("params") or []
 
-        conn = sqlite3.connect(db_path)
+        # Open in read-only mode to prevent any data mutation
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(query, params).fetchall()

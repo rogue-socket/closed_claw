@@ -57,11 +57,20 @@ class RegistryStore:
         self.embedding_dim = embedding_dim
         self.require_sqlite_vec = require_sqlite_vec
         self.sqlite_vec_available = False
+        self._cached_conn: sqlite3.Connection | None = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
-        """Run conn."""
+        """Return a cached DB connection, creating one if needed."""
+        if self._cached_conn is not None:
+            try:
+                # Verify the cached connection is still usable
+                self._cached_conn.execute("SELECT 1")
+                return self._cached_conn
+            except Exception:
+                self._cached_conn = None
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -72,7 +81,17 @@ class RegistryStore:
                 raise RuntimeError(
                     "sqlite-vec extension is required but failed to load."
                 ) from exc
+        self._cached_conn = conn
         return conn
+
+    def close(self) -> None:
+        """Close the cached connection if open."""
+        if self._cached_conn is not None:
+            try:
+                self._cached_conn.close()
+            except Exception:
+                pass
+            self._cached_conn = None
 
     def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
         """Run try load sqlite vec."""

@@ -80,7 +80,7 @@ class Settings:
             "siemens": "qwen3-30b-a3b-instruct-2507",
         }.get(provider, "gpt-4o-mini")
         return cls(
-            db_path=Path(_getenv("CLOSED_CLAW_DB_PATH", ".closed_claw/registry.db", dotenv)).expanduser(),
+            db_path=(cwd / _getenv("CLOSED_CLAW_DB_PATH", ".closed_claw/registry.db", dotenv)).expanduser().resolve(),
             agents_dir=(cwd / _getenv("CLOSED_CLAW_AGENTS_DIR", "agents", dotenv)).resolve(),
             run_logs_dir=(cwd / _getenv("CLOSED_CLAW_RUN_LOGS_DIR", ".closed_claw/runs", dotenv)).resolve(),
             embedding_model=_getenv("CLOSED_CLAW_EMBEDDING_MODEL", "all-MiniLM-L6-v2", dotenv),

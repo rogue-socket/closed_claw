@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import json
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -309,6 +310,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ----- in-process tracking for runs launched via the web UI -----
     _active_runs: dict[str, dict[str, Any]] = {}
+    _active_runs_lock = threading.Lock()
     # Maps run_id → {"task": str, "status": "running"|"completed"|"error",
     #                 "current_node": str, "result": str, "error": str,
     #                 "started_at": str, "finished_at": str|None,
@@ -910,17 +912,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log_path = settings.run_logs_dir / f"{run_id}.jsonl"
 
         def _gen() -> Generator[str, None, None]:
-            seen = 0
+            byte_offset = 0
             idle_ticks = 0
             while idle_ticks < 120:  # ~60s timeout after last event
                 if log_path.exists():
-                    lines = log_path.read_text(encoding="utf-8").splitlines()
-                    new = lines[seen:]
-                    if new:
+                    with open(log_path, "r", encoding="utf-8") as fh:
+                        fh.seek(byte_offset)
+                        new_data = fh.read()
+                        byte_offset = fh.tell()
+                    if new_data:
                         idle_ticks = 0
-                        for line in new:
-                            yield f"data: {line}\n\n"
-                        seen += len(new)
+                        for line in new_data.splitlines():
+                            if line.strip():
+                                yield f"data: {line}\n\n"
                     else:
                         idle_ticks += 1
                 else:
@@ -1009,9 +1013,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         context = body.get("context") or {}
 
         from datetime import datetime, UTC
-        import threading
 
         run_id = uuid.uuid4().hex
+        # Snapshot settings so mid-run web changes don't affect this run
+        import dataclasses
+        run_settings = dataclasses.replace(settings)
         initial_state = {
             "run_id": run_id,
             "session_id": uuid.uuid4().hex[:12],
@@ -1023,36 +1029,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
-        _active_runs[run_id] = {
-            "task": task,
-            "status": "running",
-            "current_node": "queued",
-            "result": "",
-            "error": "",
-            "started_at": datetime.now(UTC).isoformat(),
-            "finished_at": None,
-        }
+        with _active_runs_lock:
+            _active_runs[run_id] = {
+                "task": task,
+                "status": "running",
+                "current_node": "queued",
+                "result": "",
+                "error": "",
+                "started_at": datetime.now(UTC).isoformat(),
+                "finished_at": None,
+            }
 
         def _run_graph() -> None:
             """Execute the coordinator graph in a dedicated thread with its own event loop."""
             try:
-                app_graph = build_graph(settings)
-                _active_runs[run_id]["current_node"] = "ingest_task"
+                app_graph = build_graph(run_settings)
+                with _active_runs_lock:
+                    _active_runs[run_id]["current_node"] = "ingest_task"
                 result = asyncio.run(app_graph.ainvoke(initial_state))
-                _active_runs[run_id].update({
-                    "status": result.get("response_status", "completed"),
-                    "result": result.get("response_result", ""),
-                    "error": result.get("response_error", ""),
-                    "current_node": "__end__",
-                    "finished_at": datetime.now(UTC).isoformat(),
-                })
+                with _active_runs_lock:
+                    _active_runs[run_id].update({
+                        "status": result.get("response_status", "completed"),
+                        "result": result.get("response_result", ""),
+                        "error": result.get("response_error", ""),
+                        "current_node": "__end__",
+                        "finished_at": datetime.now(UTC).isoformat(),
+                    })
             except Exception as exc:
-                _active_runs[run_id].update({
-                    "status": "error",
-                    "error": str(exc),
-                    "current_node": "__error__",
-                    "finished_at": datetime.now(UTC).isoformat(),
-                })
+                with _active_runs_lock:
+                    _active_runs[run_id].update({
+                        "status": "error",
+                        "error": str(exc),
+                        "current_node": "__error__",
+                        "finished_at": datetime.now(UTC).isoformat(),
+                    })
 
         thread = threading.Thread(target=_run_graph, daemon=True)
         thread.start()
@@ -1064,16 +1074,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_active_runs() -> list[dict[str, Any]]:
         """Return all runs launched from the web UI with their live status."""
         out = []
-        for rid, info in _active_runs.items():
-            out.append({
-                "run_id": rid,
-                "task": info["task"],
-                "status": info["status"],
-                "current_node": info.get("current_node", "unknown"),
-                "started_at": info.get("started_at"),
-                "finished_at": info.get("finished_at"),
-                "error": info.get("error", ""),
-            })
+        with _active_runs_lock:
+            for rid, info in _active_runs.items():
+                out.append({
+                    "run_id": rid,
+                    "task": info["task"],
+                    "status": info["status"],
+                    "current_node": info.get("current_node", "unknown"),
+                    "started_at": info.get("started_at"),
+                    "finished_at": info.get("finished_at"),
+                    "error": info.get("error", ""),
+                })
         return out
 
     # ------------------------------------------- GET /api/runs/{run_id}/status
@@ -1087,7 +1098,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log_path = settings.run_logs_dir / f"{run_id}.jsonl"
             if log_path.exists():
                 current_node = _derive_pipeline_node(log_path)
-                active["current_node"] = current_node
+                with _active_runs_lock:
+                    active["current_node"] = current_node
             return {
                 "run_id": run_id,
                 "task": active["task"],
@@ -1144,8 +1156,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cancel_path = settings.run_logs_dir / f"{run_id}.cancel"
         cancel_path.write_text("cancel_requested\n", encoding="utf-8")
         # Also update in-memory status if tracked
-        if run_id in _active_runs:
-            _active_runs[run_id]["status"] = "cancelled"
+        with _active_runs_lock:
+            if run_id in _active_runs:
+                _active_runs[run_id]["status"] = "cancelled"
         return {"cancel_requested": True, "run_id": run_id}
 
     # -------------------------------------------------- SSE global event stream
@@ -1171,7 +1184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "finished_at": info.get("finished_at"),
                             "error": (info.get("error") or "")[:200],
                         }
-                        for rid, info in _active_runs.items()
+                        for rid, info in list(_active_runs.items())
                     ],
                     "pending_approvals": len(get_pending_approvals()),
                 }

@@ -1,5 +1,7 @@
 # Quickstart
 
+> **Last updated:** 2026-02-26 · **Doc version:** 2.0.0
+
 Fastest path to running Closed Claw locally.
 
 ---
@@ -113,6 +115,7 @@ python -m closed_claw.cli agents --limit 20
 
 # Full detail on one agent (manifest + skill.md + memory)
 python -m closed_claw.cli agent <agent_id>
+python -m closed_claw.cli agent <agent_id> --include-embedding  # include vector
 
 # Run history
 python -m closed_claw.cli runs --limit 20
@@ -128,6 +131,9 @@ python -m closed_claw.cli tools
 
 # Tools for a specific agent
 python -m closed_claw.cli tools --agent-id <agent_id>
+
+# Cancel a running task
+python -m closed_claw.cli cancel-run <run_id>
 ```
 
 ---
@@ -185,6 +191,20 @@ Override approval policy:
 --create-approval-mode approve --api-approval-mode approve
 ```
 
+### Web-mode approvals
+
+For headless runs with web UI approval:
+
+```bash
+# Start the web dashboard in one terminal
+python -m closed_claw.cli web
+
+# In another terminal, run with web approval mode
+python -m closed_claw.cli run "task" --create-approval-mode web --api-approval-mode web
+```
+
+Pending approvals appear at `http://127.0.0.1:7860` in the Approvals tab.
+
 ### Organizing files in a folder
 
 ```bash
@@ -203,11 +223,15 @@ The agent executes this using `file_io` and `terminal` tools from its `tools_all
 |----------|---------|--------|
 | `CLOSED_CLAW_LLM_PROVIDER` | `siemens` | `siemens \| openai \| gemini \| claude` |
 | `CLOSED_CLAW_LLM_MODEL` | `qwen3-30b-a3b-instruct-2507` | Model ID string |
-| `CLOSED_CLAW_CREATE_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
-| `CLOSED_CLAW_API_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny` |
+| `CLOSED_CLAW_CREATE_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny \| web` |
+| `CLOSED_CLAW_API_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny \| web` |
 | `CLOSED_CLAW_DB_PATH` | `.closed_claw/registry.db` | SQLite registry path |
 | `CLOSED_CLAW_AGENTS_DIR` | `agents` | Agent capsule root dir |
 | `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` | _(empty)_ | Comma-separated absolute paths for tool sandboxing |
+| `CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS` | `2` | Retry count for failed subtasks |
+| `CLOSED_CLAW_MAX_TOOL_CALLS_PER_AGENT` | `50` | Intent count limit per agent run |
+| `CLOSED_CLAW_MAX_AGENTS_PER_RUN` | `10` | Cap on agents created/used in one run |
+| `CLOSED_CLAW_MAX_SUBTASKS_PER_PHASE` | `4` | Cap on subtasks per discovery/execution phase |
 | `SIEMENS_API_KEY` | _(empty)_ | Siemens LLM key (default provider) |
 | `OPENAI_API_KEY` | _(empty)_ | OpenAI key |
 | `GEMINI_API_KEY` | _(empty)_ | Gemini key |

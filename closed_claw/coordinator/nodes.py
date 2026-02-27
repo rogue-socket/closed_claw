@@ -520,6 +520,249 @@ class CoordinatorNodes:
 
         return "\n".join(parts)
 
+    # ------------------------------------------------------------------
+    # Single-subtask coroutine — designed to run concurrently via
+    # asyncio.gather inside _execute_phase_pool's ready-batch.
+    # ------------------------------------------------------------------
+
+    async def _run_single_subtask(
+        self,
+        *,
+        item: dict[str, Any],
+        state: dict[str, Any],
+        phase: str,
+        pool: list[dict[str, Any]],
+        by_id: dict[str, dict[str, Any]],
+        discovery_results: dict[str, str],
+        approvals: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]],
+        role_agent_map: dict[str, str],
+        created_agents: list[dict[str, Any]],
+        subtask_results: dict[str, str],
+        api_mode: str,
+        max_agents: int,
+        agents_created_counter: list[int],
+    ) -> None:
+        """Execute a single subtask (with retries), to be gathered concurrently.
+
+        Uses per-attempt local lists for tool_events and approvals to avoid
+        cross-contamination when multiple subtasks run in parallel.  Results
+        are merged into the shared lists after each attempt completes.
+        """
+        role_tag = str(item.get("role_tag", "task-operator")) or "task-operator"
+        item["status"] = "in_progress"
+        self._emit_task_pool(state, pool, phase=phase)
+
+        dep_context = {
+            dep: by_id[dep].get("result", "")
+            for dep in item.get("depends_on", [])
+            if dep in by_id
+        }
+        criteria = item.get("acceptance_criteria", [])
+        task_payload = (
+            f"{item.get('description', '')}\n\n"
+            "Acceptance criteria:\n"
+            + "\n".join(f"- {c}" for c in criteria)
+        ).strip()
+        max_attempts = max(1, int(self.settings.subtask_max_attempts))
+        attempt_failures: list[str] = []
+        item["attempts"] = 0
+
+        for attempt_idx in range(1, max_attempts + 1):
+            item["attempts"] = attempt_idx
+            if self._is_cancel_requested(state["run_id"]):
+                item["status"] = "cancelled"
+                item["error"] = "cancelled_by_user"
+                break
+
+            # Agent acquisition — sync code, effectively atomic in asyncio's
+            # single-thread model (no await between check and mutation).
+            if role_tag not in role_agent_map:
+                if agents_created_counter[0] >= max_agents:
+                    item["status"] = "failed"
+                    item["error"] = f"max_agents_per_run_exceeded ({max_agents})"
+                    self._emit_runlog(
+                        state,
+                        "agent_creation_limit_reached",
+                        {"phase": phase, "max_agents": max_agents, "task_id": item.get("task_id")},
+                    )
+                    break
+                agent_id, created = self._acquire_agent_for_role(role_tag, item)
+                role_agent_map[role_tag] = agent_id
+                if created:
+                    agents_created_counter[0] += 1
+                    created_agents.append(created)
+                    self._emit_runlog(
+                        state,
+                        "agent_created_for_role",
+                        {
+                            "agent_id": created["agent_id"],
+                            "name": created["name"],
+                            "description": created["description"],
+                            "role_tag": role_tag,
+                            "profile_id": created.get("profile_id", ""),
+                            "tools_allowlist": created.get("tools_allowlist", []),
+                            "skill_md_preview": (created.get("skill_md", "") or "")[:500],
+                        },
+                    )
+                else:
+                    self._emit_runlog(
+                        state,
+                        "agent_reused_for_role",
+                        {
+                            "agent_id": agent_id,
+                            "role_tag": role_tag,
+                            "task_id": item.get("task_id"),
+                        },
+                    )
+            agent_id = role_agent_map[role_tag]
+            item["assigned_agent_id"] = agent_id
+
+            attempt_task_payload = (
+                f"Subtask attempt {attempt_idx}/{max_attempts}.\n"
+                f"{task_payload}"
+            )
+            req = CoordinatorRequest(
+                session_id=state["session_id"],
+                task=attempt_task_payload,
+                context={
+                    **(state.get("context", {}) or {}),
+                    "parent_task": state["task"],
+                    "task_phase": phase,
+                    "discovery_results": discovery_results,
+                    "subtask": {
+                        "task_id": item["task_id"],
+                        "title": item.get("title", ""),
+                        "phase": phase,
+                        "role_tag": role_tag,
+                        "depends_on_results": dep_context,
+                        "attempt": attempt_idx,
+                        "max_attempts": max_attempts,
+                        "prior_failures": list(attempt_failures),
+                    },
+                },
+                config=self._request_config_for_agent(agent_id),
+            )
+            composed_skill_ids = req.config.get("skill_ids", [])
+            entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
+
+            # Per-attempt local event lists — avoids cross-contamination when
+            # multiple subtasks execute concurrently.
+            attempt_tool_events: list[dict[str, Any]] = []
+            attempt_approvals: list[dict[str, Any]] = []
+
+            if composed_skill_ids:
+                self._emit_runlog(
+                    state,
+                    "skills_composed",
+                    {
+                        "agent_id": agent_id,
+                        "skill_ids": composed_skill_ids,
+                        "task_id": item.get("task_id"),
+                    },
+                )
+            self._emit_runlog(
+                state,
+                "subtask_attempt_started",
+                {
+                    "phase": phase,
+                    "task_id": item.get("task_id"),
+                    "title": item.get("title", ""),
+                    "role_tag": role_tag,
+                    "attempt": attempt_idx,
+                    "max_attempts": max_attempts,
+                    "agent_id": agent_id,
+                    "task_payload": task_payload[:1000],
+                    "depends_on": item.get("depends_on", []),
+                    "dependency_context": {k: v[:300] for k, v in dep_context.items()} if dep_context else {},
+                },
+            )
+            failure_reason = ""
+            try:
+                response = await self.runner.run_agent(
+                    agent_id=agent_id,
+                    entrypoint=entrypoint,
+                    request=req,
+                    approval_callback=lambda intent, a_id, _app=attempt_approvals: self._approval_callback(
+                        intent=intent,
+                        agent_id=a_id,
+                        run_id=state["run_id"],
+                        approvals=_app,
+                        mode=api_mode,
+                    ),
+                    tool_callback=lambda intent, a_id, _te=attempt_tool_events: self._tool_callback(
+                        intent=intent,
+                        agent_id=a_id,
+                        run_id=state["run_id"],
+                        tool_events=_te,
+                    ),
+                )
+                if response.status == "ok":
+                    # Detect agent LLM errors disguised as successful results
+                    if response.result and response.result.strip().startswith("[llm_error:"):
+                        failure_reason = f"agent_llm_failure: {response.result[:200]}"
+                    else:
+                        new_events = attempt_tool_events
+                        verification_ok, verification_msg = self._verify_subtask_tool_execution(
+                            item=item,
+                            new_tool_events=new_events,
+                        )
+                        if verification_ok:
+                            item["status"] = "completed"
+                            item["error"] = ""
+                            item["result"] = response.result
+                            subtask_results[item["task_id"]] = response.result
+                            subtask_results[f"{phase}.{item['task_id']}"] = response.result
+                            self._emit_runlog(
+                                state,
+                                "subtask_attempt_succeeded",
+                                {
+                                    "phase": phase,
+                                    "task_id": item.get("task_id"),
+                                    "title": item.get("title", ""),
+                                    "attempt": attempt_idx,
+                                    "agent_id": agent_id,
+                                    "result": (response.result or "")[:2000],
+                                    "tool_calls_in_attempt": len(new_events),
+                                    "memory_updates": response.memory_updates[:5] if response.memory_updates else [],
+                                },
+                            )
+                            # Merge per-attempt events into shared lists
+                            tool_events.extend(attempt_tool_events)
+                            approvals.extend(attempt_approvals)
+                            break
+                        failure_reason = verification_msg or "filesystem_verification_failed"
+                else:
+                    failure_reason = response.error_message or "subtask_failed"
+            except AgentRuntimeError as exc:
+                failure_reason = str(exc)
+
+            # Merge per-attempt events into shared lists
+            tool_events.extend(attempt_tool_events)
+            approvals.extend(attempt_approvals)
+
+            attempt_failures.append(failure_reason)
+            self._emit_runlog(
+                state,
+                "subtask_attempt_failed",
+                {
+                    "phase": phase,
+                    "task_id": item.get("task_id"),
+                    "attempt": attempt_idx,
+                    "max_attempts": max_attempts,
+                    "agent_id": agent_id,
+                    "error": failure_reason,
+                },
+            )
+            if attempt_idx >= max_attempts:
+                item["status"] = "failed"
+                item["error"] = failure_reason
+
+        if item["status"] not in {"completed", "failed", "cancelled"}:
+            item["status"] = "failed"
+            item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
+        self._emit_task_pool(state, pool, phase=phase)
+
     async def _execute_phase_pool(
         self,
         *,
@@ -541,7 +784,7 @@ class CoordinatorNodes:
         max_pool_iterations = len(pool) * max(1, int(self.settings.subtask_max_attempts)) + 5
         max_agents = max(1, self.settings.max_agents_per_run)
         pool_iteration = 0
-        agents_created_in_phase = 0
+        agents_created_counter: list[int] = [0]   # mutable container for concurrent access
         while True:
             pool_iteration += 1
             if pool_iteration > max_pool_iterations:
@@ -587,206 +830,27 @@ class CoordinatorNodes:
                 item["status"] = "pending" if all(dep in completed_ids for dep in deps) else "waiting"
 
             ready = [t for t in pool if t["status"] == "pending"]
-            for item in ready:
+            if ready:
                 progressed = True
-                role_tag = str(item.get("role_tag", "task-operator")) or "task-operator"
-                item["status"] = "in_progress"
-                self._emit_task_pool(state, pool, phase=phase)
-
-                dep_context = {
-                    dep: by_id[dep].get("result", "")
-                    for dep in item.get("depends_on", [])
-                    if dep in by_id
-                }
-                criteria = item.get("acceptance_criteria", [])
-                task_payload = (
-                    f"{item.get('description', '')}\n\n"
-                    "Acceptance criteria:\n"
-                    + "\n".join(f"- {c}" for c in criteria)
-                ).strip()
-                max_attempts = max(1, int(self.settings.subtask_max_attempts))
-                attempt_failures: list[str] = []
-                item["attempts"] = 0
-
-                for attempt_idx in range(1, max_attempts + 1):
-                    item["attempts"] = attempt_idx
-                    if self._is_cancel_requested(state["run_id"]):
-                        item["status"] = "cancelled"
-                        item["error"] = "cancelled_by_user"
-                        break
-
-                    if role_tag not in role_agent_map:
-                        if agents_created_in_phase >= max_agents:
-                            item["status"] = "failed"
-                            item["error"] = f"max_agents_per_run_exceeded ({max_agents})"
-                            self._emit_runlog(
-                                state,
-                                "agent_creation_limit_reached",
-                                {"phase": phase, "max_agents": max_agents, "task_id": item.get("task_id")},
-                            )
-                            break
-                        agent_id, created = self._acquire_agent_for_role(role_tag, item)
-                        role_agent_map[role_tag] = agent_id
-                        if created:
-                            agents_created_in_phase += 1
-                            created_agents.append(created)
-                            self._emit_runlog(
-                                state,
-                                "agent_created_for_role",
-                                {
-                                    "agent_id": created["agent_id"],
-                                    "name": created["name"],
-                                    "description": created["description"],
-                                    "role_tag": role_tag,
-                                    "profile_id": created.get("profile_id", ""),
-                                    "tools_allowlist": created.get("tools_allowlist", []),
-                                    "skill_md_preview": (created.get("skill_md", "") or "")[:500],
-                                },
-                            )
-                        else:
-                            self._emit_runlog(
-                                state,
-                                "agent_reused_for_role",
-                                {
-                                    "agent_id": agent_id,
-                                    "role_tag": role_tag,
-                                    "task_id": item.get("task_id"),
-                                },
-                            )
-                    agent_id = role_agent_map[role_tag]
-                    item["assigned_agent_id"] = agent_id
-
-                    attempt_task_payload = (
-                        f"Subtask attempt {attempt_idx}/{max_attempts}.\n"
-                        f"{task_payload}"
+                await asyncio.gather(*(
+                    self._run_single_subtask(
+                        item=item,
+                        state=state,
+                        phase=phase,
+                        pool=pool,
+                        by_id=by_id,
+                        discovery_results=discovery_results,
+                        approvals=approvals,
+                        tool_events=tool_events,
+                        role_agent_map=role_agent_map,
+                        created_agents=created_agents,
+                        subtask_results=subtask_results,
+                        api_mode=api_mode,
+                        max_agents=max_agents,
+                        agents_created_counter=agents_created_counter,
                     )
-                    req = CoordinatorRequest(
-                        session_id=state["session_id"],
-                        task=attempt_task_payload,
-                        context={
-                            **(state.get("context", {}) or {}),
-                            "parent_task": state["task"],
-                            "task_phase": phase,
-                            "discovery_results": discovery_results,
-                            "subtask": {
-                                "task_id": item["task_id"],
-                                "title": item.get("title", ""),
-                                "phase": phase,
-                                "role_tag": role_tag,
-                                "depends_on_results": dep_context,
-                                "attempt": attempt_idx,
-                                "max_attempts": max_attempts,
-                                "prior_failures": list(attempt_failures),
-                            },
-                        },
-                        config=self._request_config_for_agent(agent_id),
-                    )
-                    composed_skill_ids = req.config.get("skill_ids", [])
-                    entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
-                    tool_events_start = len(tool_events)
-                    if composed_skill_ids:
-                        self._emit_runlog(
-                            state,
-                            "skills_composed",
-                            {
-                                "agent_id": agent_id,
-                                "skill_ids": composed_skill_ids,
-                                "task_id": item.get("task_id"),
-                            },
-                        )
-                    self._emit_runlog(
-                        state,
-                        "subtask_attempt_started",
-                        {
-                            "phase": phase,
-                            "task_id": item.get("task_id"),
-                            "title": item.get("title", ""),
-                            "role_tag": role_tag,
-                            "attempt": attempt_idx,
-                            "max_attempts": max_attempts,
-                            "agent_id": agent_id,
-                            "task_payload": task_payload[:1000],
-                            "depends_on": item.get("depends_on", []),
-                            "dependency_context": {k: v[:300] for k, v in dep_context.items()} if dep_context else {},
-                        },
-                    )
-                    try:
-                        response = await self.runner.run_agent(
-                            agent_id=agent_id,
-                            entrypoint=entrypoint,
-                            request=req,
-                            approval_callback=lambda intent, a_id: self._approval_callback(
-                                intent=intent,
-                                agent_id=a_id,
-                                run_id=state["run_id"],
-                                approvals=approvals,
-                                mode=api_mode,
-                            ),
-                            tool_callback=lambda intent, a_id: self._tool_callback(
-                                intent=intent,
-                                agent_id=a_id,
-                                run_id=state["run_id"],
-                                tool_events=tool_events,
-                            ),
-                        )
-                        if response.status == "ok":
-                            # Detect agent LLM errors disguised as successful results
-                            if response.result and response.result.strip().startswith("[llm_error:"):
-                                failure_reason = f"agent_llm_failure: {response.result[:200]}"
-                            else:
-                                new_events = tool_events[tool_events_start:]
-                                verification_ok, verification_msg = self._verify_subtask_tool_execution(
-                                    item=item,
-                                    new_tool_events=new_events,
-                                )
-                                if verification_ok:
-                                    item["status"] = "completed"
-                                    item["error"] = ""
-                                    item["result"] = response.result
-                                    subtask_results[item["task_id"]] = response.result
-                                    subtask_results[f"{phase}.{item['task_id']}"] = response.result
-                                    self._emit_runlog(
-                                        state,
-                                        "subtask_attempt_succeeded",
-                                        {
-                                            "phase": phase,
-                                            "task_id": item.get("task_id"),
-                                            "title": item.get("title", ""),
-                                            "attempt": attempt_idx,
-                                            "agent_id": agent_id,
-                                            "result": (response.result or "")[:2000],
-                                            "tool_calls_in_attempt": len(new_events),
-                                            "memory_updates": response.memory_updates[:5] if response.memory_updates else [],
-                                        },
-                                    )
-                                    break
-                                failure_reason = verification_msg or "filesystem_verification_failed"
-                        else:
-                            failure_reason = response.error_message or "subtask_failed"
-                    except AgentRuntimeError as exc:
-                        failure_reason = str(exc)
-
-                    attempt_failures.append(failure_reason)
-                    self._emit_runlog(
-                        state,
-                        "subtask_attempt_failed",
-                        {
-                            "phase": phase,
-                            "task_id": item.get("task_id"),
-                            "attempt": attempt_idx,
-                            "max_attempts": max_attempts,
-                            "agent_id": agent_id,
-                            "error": failure_reason,
-                        },
-                    )
-                    if attempt_idx >= max_attempts:
-                        item["status"] = "failed"
-                        item["error"] = failure_reason
-
-                if item["status"] not in {"completed", "failed", "cancelled"}:
-                    item["status"] = "failed"
-                    item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
-                self._emit_task_pool(state, pool, phase=phase)
+                    for item in ready
+                ))
 
             if progressed:
                 waiting_cycles = 0

@@ -1,5 +1,7 @@
 # Coding Conventions
 
+> **Last updated:** 2026-02-26 · **Doc version:** 2.0.0
+
 All conventions are enforced by the existing codebase. Follow them exactly when adding or modifying code.
 
 ---
@@ -27,7 +29,7 @@ from __future__ import annotations
 from closed_claw.compat import BaseModel, Field
 ```
 
-This ensures Pydantic v1/v2 compatibility across installs.
+This ensures Pydantic v1/v2 compatibility across installs. The shim also provides a pure-Python fallback `BaseModel` when pydantic is not installed at all.
 
 ---
 
@@ -36,6 +38,7 @@ This ensures Pydantic v1/v2 compatibility across installs.
 - `Settings.from_env()` is the **only** way to load config.
 - Call it at the CLI boundary (in `cmd_*` functions), never at module import time.
 - Never hardcode file paths. All paths come from `Settings` fields (`db_path`, `agents_dir`, `run_logs_dir`, etc.).
+- Approval modes include `interactive`, `approve`, `deny`, and `web` (web UI approval queue).
 
 ```python
 # Correct

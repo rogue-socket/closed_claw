@@ -49,6 +49,7 @@ class AgentMetrics(BaseModel):
 
 
 class AgentResponse(BaseModel):
+    type: Literal["agent_response"] = "agent_response"
     status: Literal["ok", "error"]
     result: str = ""
     memory_updates: list[dict[str, Any]] = Field(default_factory=list)
@@ -63,6 +64,20 @@ def parse_agent_line(line: str) -> ApiCallIntent | ToolCallIntent | AgentRespons
     data = line.strip()
     if not data:
         raise ValueError("empty agent output")
+    # Fast-path: check the "type" discriminator if present
+    import json as _json
+    try:
+        peek = _json.loads(data)
+    except Exception:
+        peek = {}
+    msg_type = peek.get("type") if isinstance(peek, dict) else None
+    if msg_type == "api_call_intent":
+        return ApiCallIntent.model_validate_json(data)
+    if msg_type == "tool_call_intent":
+        return ToolCallIntent.model_validate_json(data)
+    if msg_type == "agent_response":
+        return AgentResponse.model_validate_json(data)
+    # Fallback: try each model in order (for backward compat with agents missing type field)
     try:
         return ApiCallIntent.model_validate_json(data)
     except Exception:

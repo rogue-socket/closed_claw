@@ -1,5 +1,7 @@
 # Architecture
 
+> **Last updated:** 2026-02-26 · **Doc version:** 2.0.0 · **Entrypoint template:** v13
+>
 > Deep reference. For a quick file-by-file map, see `CODEBASE_MAP.md`. For conventions, see `CONVENTIONS.md`.
 
 ---
@@ -14,13 +16,14 @@ Closed Claw is a **local capsule-based multi-agent orchestrator**. A coordinator
 |-----------|----------|------|
 | Coordinator graph | `coordinator/graph.py`, `coordinator/nodes.py` | Central LangGraph state machine that drives every run |
 | Agent capsules | `agents/<agent_id>/` | Isolated subprocesses; implement the JSON-line protocol |
-| Registry + vectors | `registry/store.py`, `registry/schema.sql` | SQLite store for agents, runs, audit events; sqlite-vec for semantic search |
+| Registry + vectors | `registry/store.py`, `registry/schema.sql` | SQLite store for agents, runs; sqlite-vec for semantic search |
 | Runtime protocol | `runtime/protocol.py`, `runtime/runner.py` | JSON-line message framing + subprocess lifecycle |
-| Policy engine | `policy/approval.py`, `policy/audit.py` | Human-in-the-loop gates; structured audit trail |
+| Policy engine | `policy/approval.py`, `policy/audit.py` | Human-in-the-loop gates (4 modes incl. web); structured audit trail |
 | Tool execution | `tools/executor.py` | Sandboxed terminal, HTTP, file I/O, Python, SQL tools |
-| Embeddings | `embeddings/provider.py` | sentence-transformers or zero-vector fallback |
+| Embeddings | `embeddings/provider.py` | sentence-transformers or SHA-256 hash fallback |
 | Run logs | `observability/runlog.py` | Per-run JSONL event stream |
-| CLI | `cli.py` | All user-facing commands |
+| CLI | `cli.py` | All user-facing commands (15 subcommands) |
+| Web dashboard | `web/server.py` | FastAPI REST API (27 endpoints) + SSE streaming + web approvals |
 
 ---
 
@@ -58,6 +61,19 @@ synthesize_final_response
 
 State flows as an immutable-merge dict (`CoordinatorState`) through every node. Each node returns `_merge(state, **updates)` — it never mutates the input.
 
+### Two-Phase Task Execution
+
+`execute_task_pool` runs tasks in **two phases**:
+
+1. **Discovery phase** — `generate_task_plan(phase="discovery")` decomposes the task into information-gathering subtasks
+2. **Execution phase** — `generate_task_plan(phase="execution", discovery_results=...)` uses discovery outputs to plan action subtasks
+
+Each phase independently acquires agents (reuse or create) and runs them with dependency-awareness. The `max_subtasks_per_phase` guardrail (default 4) caps subtask count per phase.
+
+### LLM Synthesis
+
+`synthesize_final_response` calls the LLM to produce a coherent, user-facing summary from all subtask results — not just a passthrough concatenation.
+
 ---
 
 ## Agent Capsule Model
@@ -79,7 +95,7 @@ agents/
     manifest.json   # AgentManifest — identity, metrics, tools_allowlist, tags, skill_ids, embedding
     skill.md        # Role overlay — agent-specific identity + decision rules (Layer 2)
     memory.db       # SQLite episodic memory (key/value; agent-writable)
-    entrypoint.py   # Subprocess entry; speaks JSON-line protocol (v12)
+    entrypoint.py   # Subprocess entry; speaks JSON-line protocol (v13 — ReAct loop)
     logs/           # Per-run output artifacts
 ```
 
@@ -88,8 +104,8 @@ agents/
 1. **Creation:** `CoordinatorNodes._acquire_agent_for_role` calls `AgentFactory.create_capsule()`, which writes the capsule directory. `generate_agent_profile` (via LLM or heuristic) produces `skill.md`, `tools_allowlist`, and `skill_ids` — a list of base skill module IDs the agent should inherit.
 2. **Reuse:** If a registered agent's embedding is above `low_confidence_threshold` for the current task, it is reused directly.
 3. **System prompt composition:** Before each run, `CoordinatorNodes._compose_system_prompt()` loads all `agents/skills/<id>.md` files listed in `manifest.skill_ids` (Layer 1) then appends `agents/<agent_id>/skill.md` (Layer 2). The result is passed as `config["system_prompt"]` in the `CoordinatorRequest`.
-4. **Execution:** `AgentRunner.run(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop. The v12 entrypoint reads `config["system_prompt"]` and injects it as the system role message in every LLM call.
-5. **Metrics:** After each run, `RegistryStore.update_agent_metrics` updates `usage_count`, `success_rate`, `avg_latency_ms`.
+4. **Execution:** `AgentRunner.run_agent(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop. The v13 entrypoint reads `config["system_prompt"]` and injects it as the system role message in every LLM call.
+5. **Metrics:** After each run, `RegistryStore` metrics update records `usage_count`, `success_rate`, `avg_latency_ms`.
 
 ---
 
@@ -114,7 +130,7 @@ Layer 2 — Role overlay (agents/<agent_id>/skill.md)
 
 The resulting string is injected as:
 - `config["system_prompt"]` in `CoordinatorRequest` (passed to the subprocess)
-- The system/role message prepended to every LLM call inside the v12 entrypoint
+- The system/role message prepended to every LLM call inside the v13 entrypoint
 
 **Adding a new base skill:** Create `agents/skills/<name>.md` and add the module name to `_BASE_SKILL_IDS` in `registry/search.py`. The LLM will then be able to assign it to new agents via `generate_agent_profile`.
 
@@ -172,7 +188,8 @@ All persistent state lives in `.closed_claw/registry.db` (SQLite):
 | `runs` | Run history with status, latency, agent reference |
 | `agent_compositions` | Multi-agent composition records |
 | `provider_circuit_breakers` | Per-provider failure counters + reset timestamps |
-| `audit_events` | Structured audit trail |
+
+**Note:** The `audit_events` table is created dynamically by `AuditStore._init_tables()` (not defined in `schema.sql`).
 
 A human-readable mirror lives at `agents/registry.json`.
 
@@ -196,7 +213,7 @@ score < low_confidence_threshold?
     │ no  → reuse existing agent
 ```
 
-`build_reranker(settings)` in `registry/search.py` selects `HeuristicReranker` (default) or `LLMReranker` based on `settings.llm_provider`.
+`build_reranker(settings)` in `registry/search.py` builds an `LLMReranker` using the configured provider. A heuristic fallback is used internally within the reranker when LLM calls fail.
 
 ---
 
@@ -215,6 +232,7 @@ Modes for each gate:
 - `interactive` — prompts operator on stdin with `api_approval_timeout_sec` deadline
 - `approve` — auto-approves (use in CI scripts: `--api-approval-mode approve`)
 - `deny` — auto-denies
+- `web` — publishes approval to in-memory queue; web UI dashboard resolves it
 
 ### Circuit Breaker
 
@@ -256,9 +274,10 @@ Key variable groups:
 | Storage paths | `CLOSED_CLAW_DB_PATH`, `CLOSED_CLAW_AGENTS_DIR`, `CLOSED_CLAW_RUN_LOGS_DIR` |
 | Approval modes | `CLOSED_CLAW_CREATE_APPROVAL_MODE`, `CLOSED_CLAW_API_APPROVAL_MODE` |
 | LLM provider | `CLOSED_CLAW_LLM_PROVIDER`, `CLOSED_CLAW_LLM_MODEL` |
-| API keys | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` |
+| API keys | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `SIEMENS_API_KEY` |
 | Thresholds | `CLOSED_CLAW_LOW_CONFIDENCE_THRESHOLD`, `CLOSED_CLAW_AGENT_TIMEOUT_SEC` |
 | Circuit breaker | `CLOSED_CLAW_CIRCUIT_BREAKER_FAILURES`, `CLOSED_CLAW_CIRCUIT_BREAKER_RESET_SEC` |
+| Guardrails | `CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS`, `CLOSED_CLAW_MAX_TOOL_CALLS_PER_AGENT`, `CLOSED_CLAW_MAX_AGENTS_PER_RUN`, `CLOSED_CLAW_MAX_SUBTASKS_PER_PHASE` |
 | Sandbox | `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` (comma-separated absolute paths) |
 
 See `.env.example` for the complete list with defaults.
@@ -290,7 +309,7 @@ The task pool is **not durable** — if the CLI process exits mid-run, the task 
 
 | What to extend | Where |
 |----------------|-------|
-| Add a real LLM provider client | `registry/search.py` (reranker) + `coordinator/nodes.py` (`_handle_api_call_intent`) + entrypoint template `_execute_llm_http` |
+| Add a new LLM provider | `registry/search.py` (reranker) + `coordinator/nodes.py` + entrypoint template `_execute_llm_http` + `config.py` |
 | Add a new tool | `tools/executor.py` — `SUPPORTED_TOOLS`, `TOOL_REGISTRY`, `ToolExecutor` |
 | Change agent capsule template | `closed_claw/agents/factory.py` — `ENTRYPOINT_TEMPLATE` (bump version constant) |
 | Add a coordinator node | `coordinator/nodes.py` + `coordinator/graph.py` |
@@ -320,6 +339,9 @@ The `setup` wizard prompts for provider → model → API key → runs a live ve
 ```
 .closed_claw/             # runtime data (gitignored)
   registry.db             # SQLite main database
+                          # Tables: agents, agent_vectors, runs, agent_compositions,
+                          #         provider_circuit_breakers
+                          # audit_events table created by AuditStore (not in schema.sql)
   runs/
     <run_id>.jsonl        # per-run event stream (one line per event)
 
@@ -337,7 +359,7 @@ agents/                   # agent capsule store
     manifest.json         # includes skill_ids list
     skill.md              # role overlay (Layer 2)
     memory.db
-    entrypoint.py         # v12
+    entrypoint.py         # v13 (ReAct-style loop)
     logs/
 ```
 

@@ -1,99 +1,240 @@
 # Quickstart
 
-This is the fastest way to run Closed Claw locally.
+> **Last updated:** 2026-02-26 · **Doc version:** 2.0.0
 
-## 1) Setup
+Fastest path to running Closed Claw locally.
 
-```bash
-conda create -n closed_claw python=3.11 -y
-conda activate closed_claw
-cd /Users/yashagrawal/Documents/closed_claw/closed_claw
-pip install -r requirements.txt
-cp .env.example .env
+---
+
+## 1) Environment Setup
+
+The venv is named `closed_claw` and lives inside the workspace root (alongside the source package of the same name).
+
+```powershell
+# Windows (PowerShell) — venv already created
+.\closed_claw\Scripts\Activate.ps1
+
+# If you need to recreate it:
+py -3.11 -m venv closed_claw --without-pip
+.\closed_claw\Scripts\python.exe -m ensurepip --upgrade
 ```
 
-## 2) Initialize
+```bash
+# macOS / Linux
+python3.11 -m venv closed_claw
+source closed_claw/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 2) Configure
+
+```powershell
+copy .env.example .env   # Windows
+# cp .env.example .env  # macOS/Linux
+```
+
+Edit `.env` and set `SIEMENS_API_KEY` (the default provider is `siemens`). For other providers, change `CLOSED_CLAW_LLM_PROVIDER` and set the matching API key.
+
+Or use the interactive setup wizard:
+
+```bash
+python -m closed_claw.cli setup
+```
+
+The wizard prompts for provider → model → API key → runs a live verification → saves `.env`.
+
+---
+
+## 3) Initialize
 
 ```bash
 python -m closed_claw.cli init
 python -m closed_claw.cli doctor
 ```
 
-Expected: `doctor` should report `langgraph_ok: true` and ideally `sqlite_vec_ok: true`.
+`doctor` should report `langgraph_ok: true`. `sqlite_vec_ok: true` is optional but enables semantic agent search.
 
-## 3) Run a Task
+---
 
-Interactive mode:
+## 4) Run a Task
 
-```bash
-python -m closed_claw.cli run "please use paid_api for analysis"
-```
-
-Interactive launcher:
+### Interactive menu (recommended for first use)
 
 ```bash
 python -m closed_claw.cli
 ```
 
-This opens the main menu (with startup art shown once) with setup/init/doctor/run/list options.
-You can also delete an agent from the menu.
+Opens a Rich menu with setup / init / doctor / run / inspect options.
 
-Setup wizard directly:
+### Direct run
 
 ```bash
-python -m closed_claw.cli setup
+python -m closed_claw.cli run "summarize the files in this folder"
 ```
 
-Wizard validates provider connectivity before saving.
-
-Non-interactive mode (useful for scripts/CI):
+### Non-interactive (scripts / CI)
 
 ```bash
-python -m closed_claw.cli run "please use paid_api for analysis" \
+python -m closed_claw.cli run "your task here" \
   --create-approval-mode approve \
   --api-approval-mode approve
 ```
 
-Use an LLM reranker provider (optional):
+### With explicit provider / model override
 
-```bash
-export OPENAI_API_KEY=\"<your_key>\"
-python -m closed_claw.cli run \"please use paid_api for analysis\" \
-  --llm-provider openai \
+```powershell
+# Siemens (default)
+python -m closed_claw.cli run "your task here" `
+  --create-approval-mode approve `
+  --api-approval-mode approve `
+  --llm-provider siemens `
+  --llm-model qwen3-30b-a3b-instruct-2507
+
+# OpenAI
+python -m closed_claw.cli run "your task here" `
+  --create-approval-mode approve `
+  --api-approval-mode approve `
+  --llm-provider openai `
   --llm-model gpt-4o-mini
 ```
 
-## 4) Inspect Results
+---
+
+## 5) Inspect Results
 
 ```bash
+# List agents created so far
 python -m closed_claw.cli agents --limit 20
-python -m closed_claw.cli runs --limit 20
-python -m closed_claw.cli audit --limit 20
-python -m closed_claw.cli runlog <run_id> --tail 200
-python -m closed_claw.cli tools
-python -m closed_claw.cli tools --agent-id <agent_id>
+
+# Full detail on one agent (manifest + skill.md + memory)
 python -m closed_claw.cli agent <agent_id>
-python -m closed_claw.cli delete-agent <agent_id>
-python -m closed_claw.cli delete-all-agents
+python -m closed_claw.cli agent <agent_id> --include-embedding  # include vector
+
+# Run history
+python -m closed_claw.cli runs --limit 20
+
+# Audit trail
+python -m closed_claw.cli audit --limit 20
+
+# Live JSONL events for a specific run
+python -m closed_claw.cli runlog <run_id> --tail 200
+
+# Supported tools
+python -m closed_claw.cli tools
+
+# Tools for a specific agent
+python -m closed_claw.cli tools --agent-id <agent_id>
+
+# Cancel a running task
+python -m closed_claw.cli cancel-run <run_id>
 ```
 
-## 5) Run Tests
+---
+
+## 6) Manage Agents
+
+```bash
+# Delete one agent
+python -m closed_claw.cli delete-agent <agent_id>
+python -m closed_claw.cli delete-agent <agent_id> --yes   # skip confirmation
+
+# Delete all agents (reset)
+python -m closed_claw.cli delete-all-agents
+python -m closed_claw.cli delete-all-agents --yes
+```
+
+---
+
+## 7) Run Tests
 
 ```bash
 pytest -q
 ```
 
+---
+
 ## Common Fixes
 
-If sqlite-vec fails:
+### sqlite-vec not loading
 
 ```bash
 export SQLITE_VEC_PATH="$(python -c 'import sqlite_vec; print(sqlite_vec.loadable_path())')"
 python -m closed_claw.cli doctor
 ```
 
-If you want fully local/offline deterministic embeddings:
+Or disable the requirement entirely:
+
+```bash
+CLOSED_CLAW_REQUIRE_SQLITE_VEC=false python -m closed_claw.cli doctor
+```
+
+### Slow startup (sentence-transformers model download)
+
+Disable neural embeddings (uses zero-vector instead — still works, no semantic search):
 
 ```bash
 export CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS=false
 ```
+
+### Interactive prompt blocks automation
+
+Override approval policy:
+
+```bash
+--create-approval-mode approve --api-approval-mode approve
+```
+
+### Web-mode approvals
+
+For headless runs with web UI approval:
+
+```bash
+# Start the web dashboard in one terminal
+python -m closed_claw.cli web
+
+# In another terminal, run with web approval mode
+python -m closed_claw.cli run "task" --create-approval-mode web --api-approval-mode web
+```
+
+Pending approvals appear at `http://127.0.0.1:7860` in the Approvals tab.
+
+### Organizing files in a folder
+
+```bash
+python -m closed_claw.cli run "organize files in /absolute/path/to/folder by file type" \
+  --create-approval-mode approve \
+  --api-approval-mode approve
+```
+
+The agent executes this using `file_io` and `terminal` tools from its `tools_allowlist`.
+
+---
+
+## Key Env Vars Reference
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
+| `CLOSED_CLAW_LLM_PROVIDER` | `siemens` | `siemens \| openai \| gemini \| claude` |
+| `CLOSED_CLAW_LLM_MODEL` | `qwen3-30b-a3b-instruct-2507` | Model ID string |
+| `CLOSED_CLAW_CREATE_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny \| web` |
+| `CLOSED_CLAW_API_APPROVAL_MODE` | `interactive` | `interactive \| approve \| deny \| web` |
+| `CLOSED_CLAW_DB_PATH` | `.closed_claw/registry.db` | SQLite registry path |
+| `CLOSED_CLAW_AGENTS_DIR` | `agents` | Agent capsule root dir |
+| `CLOSED_CLAW_EXTRA_ALLOWED_PATHS` | _(empty)_ | Comma-separated absolute paths for tool sandboxing |
+| `CLOSED_CLAW_SUBTASK_MAX_ATTEMPTS` | `2` | Retry count for failed subtasks |
+| `CLOSED_CLAW_MAX_TOOL_CALLS_PER_AGENT` | `50` | Intent count limit per agent run |
+| `CLOSED_CLAW_MAX_AGENTS_PER_RUN` | `10` | Cap on agents created/used in one run |
+| `CLOSED_CLAW_MAX_SUBTASKS_PER_PHASE` | `4` | Cap on subtasks per discovery/execution phase |
+| `SIEMENS_API_KEY` | _(empty)_ | Siemens LLM key (default provider) |
+| `OPENAI_API_KEY` | _(empty)_ | OpenAI key |
+| `GEMINI_API_KEY` | _(empty)_ | Gemini key |
+| `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic key |
+
+Full list in `.env.example` and `closed_claw/config.py`.

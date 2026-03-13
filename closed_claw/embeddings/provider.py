@@ -36,6 +36,13 @@ class EmbeddingProvider:
             return [float(x) for x in vec.tolist()]
 
         # Deterministic fallback to keep local execution functional without model download.
+        import logging
+        logging.getLogger("closed_claw.embeddings").warning(
+            "sentence-transformers not available — using SHA-256 fallback. "
+            "Agent semantic search will be NON-FUNCTIONAL (random rankings). "
+            "Set CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS=true and install "
+            "sentence-transformers to enable real embeddings."
+        )
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         base = [b / 255.0 for b in digest]
         out: list[float] = []

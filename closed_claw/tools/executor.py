@@ -46,7 +46,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         },
     },
     "python_exec": {
-        "description": "Execute a short Python snippet.",
+        "description": (
+            "Execute a short Python snippet. "
+            "IMPORTANT: stdin is closed — code must NOT use input(), sys.stdin, "
+            "or any interactive prompts. Use hardcoded values or function args instead. "
+            "Scripts with input() will receive immediate EOF and fail."
+        ),
         "args_schema": {"code": "string", "timeout_s": "int(optional)"},
     },
     "sql_query": {
@@ -70,6 +75,21 @@ def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
 
 
 class ToolExecutor:
+    # Common LLM arg-name mistakes → canonical arg names per tool.
+    # Defence-in-depth: even when the prompt tells the LLM the correct names,
+    # some models still use natural-language aliases like "command" for "cmd".
+    _ARG_ALIASES: dict[str, dict[str, str]] = {
+        "terminal": {"command": "cmd", "shell": "cmd", "run": "cmd", "exec": "cmd",
+                      "timeout": "timeout_s"},
+        "http_api": {"body": "json", "data": "json", "timeout": "timeout_s"},
+        "web_fetch": {"timeout": "timeout_s", "link": "url"},
+        "file_io": {"operation": "op", "action": "op", "file": "path", "file_path": "path",
+                     "filepath": "path", "data": "content", "text": "content"},
+        "python_exec": {"script": "code", "python": "code", "snippet": "code",
+                         "timeout": "timeout_s"},
+        "sql_query": {"sql": "query", "database": "db_path", "db": "db_path"},
+    }
+
     def __init__(self, workspace_root: Path, allowed_roots: list[Path] | None = None) -> None:
         """Initialize the instance."""
         self.workspace_root = workspace_root.resolve()
@@ -77,10 +97,33 @@ class ToolExecutor:
         if allowed_roots:
             self.allowed_roots.extend(p.resolve() for p in allowed_roots)
 
+    @classmethod
+    def _normalize_args(cls, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Remap common LLM arg-name mistakes to canonical names."""
+        aliases = cls._ARG_ALIASES.get(tool)
+        if not aliases:
+            return args
+        normalized: dict[str, Any] = {}
+        for key, value in args.items():
+            canonical = aliases.get(key, key)
+            # Detect duplicate: two keys mapping to the same canonical name
+            if canonical in normalized:
+                import logging
+                logging.getLogger("closed_claw.tools").warning(
+                    "Tool '%s': arg '%s' maps to canonical '%s' which is already set — ignoring duplicate",
+                    tool, key, canonical,
+                )
+                continue
+            normalized[canonical] = value
+        return normalized
+
     def execute(self, tool: str, args: dict[str, Any], allowlist: list[str]) -> dict[str, Any]:
         """Run execute."""
         if tool not in allowlist:
             raise ToolExecutionError(f"tool '{tool}' is not allowed for this agent")
+
+        # Normalize common arg-name aliases before dispatching
+        args = self._normalize_args(tool, args)
 
         if tool == "terminal":
             return self._terminal(args)
@@ -205,23 +248,52 @@ class ToolExecutor:
             return {"appended": True, "path": str(path)}
         raise ToolExecutionError("file_io op must be list|read|write|append")
 
+    # Patterns that indicate a script reads from stdin and would block forever.
+    _INTERACTIVE_PATTERNS = (
+        "input(", "sys.stdin", "raw_input(", "fileinput.input(",
+    )
+
     def _python_exec(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Run python exec."""
+        """Run python exec.
+
+        Stdin is closed (subprocess.DEVNULL) so scripts containing ``input()``
+        receive immediate EOF instead of hanging until timeout.  An explicit
+        warning is injected into stderr when interactive patterns are detected.
+        """
         code = str(args.get("code", "")).strip()
         if not code:
             raise ToolExecutionError("python_exec requires 'code'")
         timeout_s = int(args.get("timeout_s", 15))
+
+        # Detect interactive stdin patterns — warn but still run (stdin is
+        # closed via DEVNULL so the script will get immediate EOF / EOFError).
+        interactive_warning = ""
+        code_lower = code.lower()
+        for pattern in self._INTERACTIVE_PATTERNS:
+            if pattern in code_lower:
+                interactive_warning = (
+                    f"WARNING: code contains '{pattern}' which reads from stdin. "
+                    "stdin is closed in python_exec — the script will receive "
+                    "immediate EOF.  Rewrite the code to use function arguments "
+                    "or hardcoded values instead of interactive input().\n"
+                )
+                break
+
         proc = subprocess.run(
             [sys.executable, "-c", code],
             cwd=self.workspace_root,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
+        stderr = proc.stderr
+        if interactive_warning:
+            stderr = interactive_warning + stderr
         return {
             "returncode": proc.returncode,
             "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stderr": stderr,
         }
 
     def _sql_query(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -236,7 +308,8 @@ class ToolExecutor:
             raise ToolExecutionError("sql_query only allows SELECT statements")
         params = args.get("params") or []
 
-        conn = sqlite3.connect(db_path)
+        # Open in read-only mode to prevent any data mutation
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(query, params).fetchall()

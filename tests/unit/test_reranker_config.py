@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from closed_claw.config import Settings
 from closed_claw.registry.search import HeuristicReranker, LLMReranker, build_reranker
 
@@ -33,23 +35,31 @@ def _settings(provider: str, generic_key: str = "", openai_key: str = "", gemini
         openai_api_key=openai_key,
         gemini_api_key=gemini_key,
         anthropic_api_key=anthropic_key,
+        siemens_api_key="",
         openai_base_url="https://api.openai.com",
         gemini_base_url="https://generativelanguage.googleapis.com",
         anthropic_base_url="https://api.anthropic.com",
+        siemens_base_url="https://api.siemens.com/llm",
         extra_allowed_paths=[],
     )
 
 
-def test_default_heuristic():
-    """Test default heuristic."""
-    rr = build_reranker(_settings("heuristic"))
-    assert isinstance(rr, HeuristicReranker)
+def test_heuristic_provider_raises():
+    """build_reranker must raise when provider is heuristic."""
+    with pytest.raises(ValueError, match="LLM provider required"):
+        build_reranker(_settings("heuristic"))
 
 
-def test_openai_without_key_falls_back():
-    """Test openai without key falls back."""
-    rr = build_reranker(_settings("openai"))
-    assert isinstance(rr, HeuristicReranker)
+def test_openai_without_key_raises():
+    """build_reranker must raise when provider is openai but no key is set."""
+    with pytest.raises(ValueError, match="No API key found"):
+        build_reranker(_settings("openai"))
+
+
+def test_unsupported_provider_raises():
+    """build_reranker must raise for unknown provider names."""
+    with pytest.raises(ValueError, match="Unsupported LLM provider"):
+        build_reranker(_settings("magic-ai"))
 
 
 def test_openai_with_key_uses_llm():

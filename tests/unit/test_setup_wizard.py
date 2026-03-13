@@ -18,8 +18,9 @@ def test_upsert_env(tmp_path: Path):
     assert "C=3" in content
 
 
-def test_verify_heuristic():
-    """Test verify heuristic."""
-    ok, msg = verify_provider("heuristic", "local-heuristic", "")
-    assert ok is True
-    assert "requires no API key" in msg
+def test_verify_provider_missing_key():
+    """verify_provider must return False when API key is empty."""
+    for provider in ("openai", "gemini", "claude", "siemens"):
+        ok, msg = verify_provider(provider, "some-model", "")
+        assert ok is False, f"Expected False for {provider} with no key"
+        assert "missing API key" in msg

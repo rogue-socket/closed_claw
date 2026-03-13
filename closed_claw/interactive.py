@@ -24,7 +24,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         print("11) Delete Agent")
         print("12) Delete All Agents")
         print("13) Stop Run Loop (graceful)")
-        print("14) Exit")
+        print("14) Web Dashboard")
+        print("15) Exit")
 
         choice = _safe_input("Choose an option: ")
         if choice is None:
@@ -70,6 +71,8 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
         elif choice == "13":
             _cancel_run_interactive(handlers)
         elif choice == "14":
+            handlers["web"](Namespace(host="127.0.0.1", port=7860))
+        elif choice == "15":
             print("Goodbye.")
             return 0
         else:
@@ -98,7 +101,7 @@ def _run_task_interactive(handlers: dict[str, callable]) -> None:
     context_raw = raw_context.strip() or None
     create_mode = _choose_mode("Create approval mode", default="interactive")
     api_mode = _choose_mode("API approval mode", default="interactive")
-    llm_provider = _choose_provider(default="heuristic")
+    llm_provider = _choose_provider(default="siemens")
     llm_model = input("LLM model [provider default]: ").strip() or None
     organize_path = _safe_input("Organize path override [none]: ")
     dry_run = (_safe_input("Organize dry-run? (yes/no) [no]: ") or "").strip().lower() in {"yes", "y"}
@@ -195,7 +198,7 @@ def _choose_mode(label: str, default: str) -> str:
 
 def _choose_provider(default: str) -> str:
     """Run choose provider."""
-    options = ["heuristic", "openai", "gemini", "claude"]
+    options = ["openai", "gemini", "claude", "siemens"]
     print("LLM provider:")
     for i, provider in enumerate(options, start=1):
         print(f"  {i}. {provider}")

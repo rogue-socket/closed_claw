@@ -102,9 +102,11 @@ def _settings(tmp_path: Path) -> Settings:
         openai_api_key="",
         gemini_api_key="",
         anthropic_api_key="",
+        siemens_api_key="",
         openai_base_url="https://api.openai.com",
         gemini_base_url="https://generativelanguage.googleapis.com",
         anthropic_base_url="https://api.anthropic.com",
+        siemens_base_url="https://api.siemens.com/llm",
         extra_allowed_paths=[],
         subtask_max_attempts=1,
     )

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from closed_claw.config import Settings
 from closed_claw.registry.search import generate_agent_profile, generate_task_plan
 
@@ -39,27 +41,24 @@ def _settings(
         openai_api_key=openai_key,
         gemini_api_key="",
         anthropic_api_key="",
+        siemens_api_key="",
         openai_base_url="https://api.openai.com",
         gemini_base_url="https://generativelanguage.googleapis.com",
         anthropic_base_url="https://api.anthropic.com",
+        siemens_base_url="https://api.siemens.com/llm",
         extra_allowed_paths=[],
     )
 
 
-def test_generate_agent_profile_heuristic_is_task_driven():
-    """Test generate agent profile heuristic is task driven."""
-    task = "Build terraform aws networking modules and validate deployment plan"
-    profile = generate_agent_profile(
-        settings=_settings(provider="heuristic"),
-        task=task,
-        supported_tools=["terminal", "file_io", "python_exec", "http_api"],
-        fallback_tools=["terminal", "file_io"],
-    )
-    assert profile["name_prefix"] != "General Terminal Operator"
-    assert "Operator" in profile["name_prefix"]
-    assert "terraform" in profile["description"].lower()
-    assert "terminal" in profile["tools_allowlist"]
-    assert profile["profile_id"]
+def test_generate_agent_profile_heuristic_raises():
+    """generate_agent_profile must raise when provider is heuristic."""
+    with pytest.raises(ValueError, match="LLM provider required"):
+        generate_agent_profile(
+            settings=_settings(provider="heuristic"),
+            task="Build terraform aws networking modules and validate deployment plan",
+            supported_tools=["terminal", "file_io", "python_exec", "http_api"],
+            fallback_tools=["terminal", "file_io"],
+        )
 
 
 def test_generate_agent_profile_llm_output_sanitized(monkeypatch):
@@ -91,27 +90,20 @@ def test_generate_agent_profile_llm_output_sanitized(monkeypatch):
     assert profile["skill_md"].startswith("# ")
 
 
-def test_generate_task_plan_without_llm_uses_default_single_task():
-    """Test generate task plan without llm uses default single task."""
-    task = (
-        "Go to /tmp/project-alpha, inspect files there, read instructions, "
-        "write python code from them, and save it in that directory."
-    )
-    plan = generate_task_plan(settings=_settings(provider="heuristic"), task=task)
-
-    assert len(plan) == 1
-    assert plan[0]["task_id"] == "execute-task"
-    assert plan[0]["role_tag"] == "task-operator"
+def test_generate_task_plan_heuristic_raises():
+    """generate_task_plan must raise when provider is heuristic."""
+    with pytest.raises(ValueError, match="LLM provider required"):
+        generate_task_plan(
+            settings=_settings(provider="heuristic"),
+            task="Go to /tmp/project-alpha, inspect and write python code.",
+        )
 
 
-def test_generate_task_plan_discovery_phase_without_llm_uses_default_discovery_task():
-    """Test generate task plan discovery phase without llm uses default discovery task."""
-    plan = generate_task_plan(
-        settings=_settings(provider="heuristic"),
-        task="Gather context before implementing a file task.",
-        phase="discovery",
-    )
-    assert len(plan) == 1
-    assert plan[0]["task_id"] == "collect-required-context"
-    assert plan[0]["role_tag"] == "context-discoverer"
-    assert plan[0]["requires_tool"] is True
+def test_generate_task_plan_discovery_phase_heuristic_raises():
+    """generate_task_plan must raise for discovery phase when provider is heuristic."""
+    with pytest.raises(ValueError, match="LLM provider required"):
+        generate_task_plan(
+            settings=_settings(provider="heuristic"),
+            task="Gather context before implementing a file task.",
+            phase="discovery",
+        )

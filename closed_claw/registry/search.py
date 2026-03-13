@@ -73,7 +73,7 @@ class LLMReranker:
 
     def _call_provider(self, task: str, candidates: list[SearchCandidate]) -> str:
         """Run call provider."""
-        if self.provider == "openai":
+        if self.provider in ("openai", "siemens"):
             return self._call_openai(task, candidates)
         if self.provider == "gemini":
             return self._call_gemini(task, candidates)
@@ -197,29 +197,62 @@ class LLMReranker:
         return out
 
 
+# Canonical base skill module IDs — kept in sync with agents/skills/*.md files.
+_BASE_SKILL_IDS = [
+    "terminal",
+    "python_scripting",
+    "git",
+    "file_system",
+    "web_http",
+    "sql_databases",
+    "data_analysis",
+]
+
+
 def generate_agent_profile(
     settings: Settings,
     task: str,
     supported_tools: list[str],
     fallback_tools: list[str],
 ) -> dict[str, Any]:
-    """Run generate agent profile."""
+    """Generate a capability profile for a new agent using the configured LLM.
+
+    Raises ValueError when no real LLM is configured.
+    Raises RuntimeError when the LLM call fails or returns unusable output.
+    """
     provider = settings.llm_provider.lower()
     key, base = _provider_key_and_base(settings, provider)
-    if provider == "heuristic" or not key:
-        return _default_agent_profile(task, supported_tools, fallback_tools)
+    if provider == "heuristic":
+        raise ValueError(
+            "LLM provider required for agent profile generation. "
+            "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens and the matching API key."
+        )
+    if not key:
+        raise ValueError(
+            f"No API key found for provider {provider!r}. Set the matching key in .env."
+        )
 
     prompt = (
         "You create reusable capability profiles for specialist agents.\n"
         "Given a user task, return JSON only with keys:\n"
-        "profile_id, name_prefix, description, tools_allowlist, tags, skill_md, api_capabilities, requires_approval_for.\n"
+        "profile_id, name_prefix, description, tools_allowlist, tags, skill_md, "
+        "skill_ids, api_capabilities, requires_approval_for.\n"
         f"Allowed tools: {json.dumps(supported_tools)}\n"
+        f"Available base skill modules (skill_ids): {json.dumps(_BASE_SKILL_IDS)}\n"
         "Rules:\n"
         "- profile must be reusable and capability-oriented, not a one-off task label.\n"
         "- name_prefix should be concise (2-5 words).\n"
         "- description max 28 words.\n"
         "- tags should include 'auto' and 'capability'.\n"
-        "- skill_md should be a short markdown role guide.\n"
+        "- skill_md must be a detailed markdown role guide (identity, decision rules, output format).\n"
+        "- skill_ids must be a subset of available base skill modules that apply to this agent.\n"
+        "- ROLE BOUNDARY: skill_md MUST include a 'Scope Constraints' section that "
+        "explicitly states what the agent is allowed to do and what it must NOT do. "
+        "For example, a reader agent must NOT write or modify files; a validator must NOT "
+        "implement solutions. Only grant file_io write access in tools_allowlist when the "
+        "agent's role genuinely requires creating or modifying files.\n"
+        "- tools_allowlist must be the MINIMUM set of tools needed for the role. "
+        "Do not grant tools the agent does not need.\n"
         f"Task: {task.strip()}"
     )
     try:
@@ -243,9 +276,14 @@ def generate_agent_profile(
             )
             if profile:
                 return profile
-    except Exception:
-        pass
-    return _default_agent_profile(task, supported_tools, fallback_tools)
+    except Exception as exc:
+        raise RuntimeError(
+            f"LLM call failed during agent profile generation ({provider}): {exc}"
+        ) from exc
+    raise RuntimeError(
+        "LLM returned a response but no valid agent profile could be extracted. "
+        "Check that the model returns JSON matching the expected schema."
+    )
 
 
 def _extract_json(text: str) -> Any:
@@ -267,10 +305,19 @@ def _extract_json(text: str) -> Any:
 
 
 def build_reranker(settings: Settings) -> RerankerProtocol:
-    """Run build reranker."""
+    """Build and return an LLMReranker for the configured provider.
+
+    Raises ValueError when no real LLM provider or API key is configured.
+    HeuristicReranker is retained only as an internal fallback inside LLMReranker
+    for transient network/parse failures — it is never the primary path.
+    """
     provider = settings.llm_provider.lower()
     if provider == "heuristic":
-        return HeuristicReranker()
+        raise ValueError(
+            "LLM provider required. "
+            "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens "
+            "and the matching API key in .env"
+        )
 
     key = settings.llm_api_key.strip()
     if provider == "openai":
@@ -282,11 +329,20 @@ def build_reranker(settings: Settings) -> RerankerProtocol:
     elif provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         base = settings.anthropic_base_url
+    elif provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        base = settings.siemens_base_url
     else:
-        return HeuristicReranker()
+        raise ValueError(
+            f"Unsupported LLM provider: {provider!r}. "
+            "Expected one of: openai, gemini, claude, siemens."
+        )
 
     if not key:
-        return HeuristicReranker()
+        raise ValueError(
+            f"No API key found for provider {provider!r}. "
+            "Set the matching key in .env (e.g. CLOSED_CLAW_OPENAI_API_KEY)."
+        )
 
     return LLMReranker(
         provider=provider,
@@ -294,17 +350,23 @@ def build_reranker(settings: Settings) -> RerankerProtocol:
         api_key=key,
         timeout_sec=settings.llm_timeout_sec,
         base_url=base,
-        fallback=HeuristicReranker(),
+        fallback=HeuristicReranker(),  # used only when the live LLM call fails transiently
     )
 
 
 def generate_agent_description(settings: Settings, task: str) -> str:
-    """Run generate agent description."""
+    """Generate a short agent description using the configured LLM.
+
+    Raises ValueError when no real LLM is configured.
+    Raises RuntimeError when the LLM call fails.
+    """
     task = task.strip()
-    heuristic = f"Specialist for tasks similar to: {task[:120]}"
     provider = settings.llm_provider.lower()
     if provider == "heuristic":
-        return heuristic
+        raise ValueError(
+            "LLM provider required for agent description generation. "
+            "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens and the matching API key."
+        )
 
     key = settings.llm_api_key.strip()
     if provider == "openai":
@@ -316,10 +378,13 @@ def generate_agent_description(settings: Settings, task: str) -> str:
     elif provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         base = settings.anthropic_base_url.rstrip("/")
+    elif provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        base = settings.siemens_base_url.rstrip("/")
     else:
-        return heuristic
+        raise ValueError(f"Unsupported LLM provider: {provider!r}.")
     if not key:
-        return heuristic
+        raise ValueError(f"No API key found for provider {provider!r}. Set the matching key in .env.")
 
     prompt = (
         "Write one concise agent description (max 20 words) for a specialist that handles this task. "
@@ -329,7 +394,7 @@ def generate_agent_description(settings: Settings, task: str) -> str:
     try:
         import httpx
 
-        if provider == "openai":
+        if provider in ("openai", "siemens"):
             url = f"{base}/v1/chat/completions"
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
             body = {
@@ -342,7 +407,7 @@ def generate_agent_description(settings: Settings, task: str) -> str:
                 resp = client.post(url, headers=headers, json=body)
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
-                return _clean_description(text, heuristic)
+                return _clean_description(text, "")
 
         if provider == "gemini":
             url = f"{base}/v1beta/models/{settings.llm_model}:generateContent"
@@ -357,7 +422,7 @@ def generate_agent_description(settings: Settings, task: str) -> str:
                 )
                 resp.raise_for_status()
                 text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return _clean_description(text, heuristic)
+                return _clean_description(text, "")
 
         if provider == "claude":
             url = f"{base}/v1/messages"
@@ -382,11 +447,13 @@ def generate_agent_description(settings: Settings, task: str) -> str:
                     for block in resp.json().get("content", [])
                     if isinstance(block, dict)
                 ]
-                return _clean_description(" ".join(parts), heuristic)
-    except Exception:
-        return heuristic
+                return _clean_description(" ".join(parts), "")
+    except Exception as exc:
+        raise RuntimeError(
+            f"LLM call failed during agent description generation ({provider}): {exc}"
+        ) from exc
 
-    return heuristic
+    raise RuntimeError(f"Provider {provider!r} matched no HTTP branch — this should not be reached.")
 
 
 def _clean_description(text: str, fallback: str) -> str:
@@ -404,12 +471,23 @@ def generate_task_plan(
     phase: str = "execution",
     discovery_results: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run generate task plan."""
+    """Generate a structured multi-agent task plan using the configured LLM.
+
+    Raises ValueError when no real LLM is configured.
+    Raises RuntimeError when the LLM call fails or returns unusable output.
+    """
     phase_name = "discovery" if phase == "discovery" else "execution"
     provider = settings.llm_provider.lower()
     key, base = _provider_key_and_base(settings, provider)
-    if provider == "heuristic" or not key:
-        return _default_task_plan(task, phase=phase_name)
+    if provider == "heuristic":
+        raise ValueError(
+            "LLM provider required for task planning. "
+            "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens and the matching API key."
+        )
+    if not key:
+        raise ValueError(
+            f"No API key found for provider {provider!r}. Set the matching key in .env."
+        )
 
     prompt = _task_plan_prompt(
         task=task,
@@ -432,9 +510,14 @@ def generate_task_plan(
             tasks = _normalize_plan_payload(payload)
             if tasks:
                 return tasks
-    except Exception:
-        pass
-    return _default_task_plan(task, phase=phase_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"LLM call failed during task planning ({provider}): {exc}"
+        ) from exc
+    raise RuntimeError(
+        "LLM returned a response but no valid task plan could be extracted. "
+        "Ensure the model returns JSON with a 'subtasks' array."
+    )
 
 
 def _task_plan_prompt(task: str, phase: str, discovery_results: dict[str, str]) -> str:
@@ -445,10 +528,15 @@ def _task_plan_prompt(task: str, phase: str, discovery_results: dict[str, str]) 
         "{\"subtasks\":[{\"task_id\":str,\"title\":str,\"description\":str,\"role_tag\":str,"
         "\"depends_on\":[str],\"acceptance_criteria\":[str],\"requires_tool\":bool}]}\n"
         "Rules:\n"
-        "- Decompose into atomic tasks.\n"
+        "- Use the FEWEST subtasks possible. Most tasks need 1-3 subtasks, NEVER more than 4.\n"
+        "- Do NOT split work that a single agent can handle in one step. "
+        "For example, 'read a file and write code' is ONE subtask, not three.\n"
+        "- Merge closely related actions (read + parse, implement + save) into one subtask.\n"
         "- Prefer independent tasks; only include dependencies when unavoidable.\n"
         "- role_tag should be reusable capability labels (not person names).\n"
         "- each acceptance_criteria entry must be verifiable.\n"
+        "- Each subtask description MUST include a SCOPE CONSTRAINT stating what "
+        "the agent must NOT do (e.g., 'Do NOT write files' for a reader role).\n"
     )
     if phase == "discovery":
         return (
@@ -483,6 +571,9 @@ def _provider_key_and_base(settings: Settings, provider: str) -> tuple[str, str]
     if provider == "claude":
         key = key or settings.anthropic_api_key.strip()
         return key, settings.anthropic_base_url.rstrip("/")
+    if provider == "siemens":
+        key = key or settings.siemens_api_key.strip()
+        return key, settings.siemens_base_url.rstrip("/")
     return "", ""
 
 
@@ -500,7 +591,7 @@ def _generate_text_with_provider(
     """Run generate text with provider."""
     import httpx
 
-    if provider == "openai":
+    if provider in ("openai", "siemens"):
         with httpx.Client(timeout=timeout_sec) as client:
             resp = client.post(
                 f"{base_url}/v1/chat/completions",
@@ -590,6 +681,12 @@ def _normalize_profile_payload(
     elif not skill_md.startswith("#"):
         skill_md = f"# {name_prefix}\n\n{skill_md}"
 
+    skill_ids_raw = payload.get("skill_ids", [])
+    skill_ids = [
+        s for s in (skill_ids_raw if isinstance(skill_ids_raw, list) else [])
+        if isinstance(s, str) and s.strip() and s.strip() in _BASE_SKILL_IDS
+    ]
+
     return {
         "profile_id": profile_id,
         "name_prefix": name_prefix,
@@ -597,6 +694,7 @@ def _normalize_profile_payload(
         "tools_allowlist": tools,
         "tags": tags,
         "skill_md": skill_md,
+        "skill_ids": skill_ids,
         "api_capabilities": [
             str(v).strip()
             for v in payload.get("api_capabilities", [])
@@ -607,28 +705,6 @@ def _normalize_profile_payload(
             for v in payload.get("requires_approval_for", [])
             if isinstance(v, str) and str(v).strip()
         ] if isinstance(payload.get("requires_approval_for", []), list) else [],
-    }
-
-
-def _default_agent_profile(task: str, supported_tools: list[str], fallback_tools: list[str]) -> dict[str, Any]:
-    """Run default agent profile."""
-    name_prefix = "Task Operator"
-    description = f"Reusable capability operator for task: {task.strip()[:140]}"
-    tools = [t for t in fallback_tools if t in supported_tools] or ["terminal"]
-    profile_id = "task-operator"
-    return {
-        "profile_id": profile_id,
-        "name_prefix": name_prefix,
-        "description": description,
-        "tools_allowlist": tools,
-        "tags": ["auto", "capability", profile_id],
-        "skill_md": (
-            f"# {name_prefix}\n\n"
-            f"You are a capability-focused operator for tasks in this domain: {task.strip()}\n"
-            "Prioritize safe execution, clear plans, and concrete result reporting.\n"
-        ),
-        "api_capabilities": [],
-        "requires_approval_for": [],
     }
 
 
@@ -703,40 +779,3 @@ def _normalize_plan_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for item in out:
         item["depends_on"] = [dep for dep in item["depends_on"] if dep in valid_ids and dep != item["task_id"]]
     return out
-
-
-def _default_task_plan(task: str, *, phase: str = "execution") -> list[dict[str, Any]]:
-    """Run default task plan."""
-    clean_task = _clean_text(task, "Execute task", 260)
-    if phase == "discovery":
-        return [
-            {
-                "task_id": "collect-required-context",
-                "title": "Collect Required Context",
-                "description": (
-                    "Gather and verify any concrete context needed to execute the user task safely, "
-                    f"including relevant paths, files, prerequisites, and constraints. Task: {clean_task}"
-                ),
-                "role_tag": "context-discoverer",
-                "depends_on": [],
-                "acceptance_criteria": [
-                    "All prerequisite context needed for execution is explicitly captured.",
-                    "Any blockers or missing information are clearly identified.",
-                ],
-                "requires_tool": True,
-            }
-        ]
-    return [
-        {
-            "task_id": "execute-task",
-            "title": "Execute User Task",
-            "description": clean_task,
-            "role_tag": "task-operator",
-            "depends_on": [],
-            "acceptance_criteria": [
-                "All explicit user requirements are addressed.",
-                "Final output summarizes what was done and resulting artifacts.",
-            ],
-            "requires_tool": False,
-        }
-    ]

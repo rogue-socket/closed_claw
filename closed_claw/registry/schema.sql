@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS agents (
   tags_json TEXT NOT NULL,
   api_capabilities_json TEXT NOT NULL,
   requires_approval_for_json TEXT NOT NULL,
+  skill_ids_json TEXT NOT NULL DEFAULT '[]',
   version TEXT NOT NULL,
   created_at TEXT NOT NULL,
   last_used_at TEXT,

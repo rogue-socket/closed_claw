@@ -282,7 +282,15 @@ class CoordinatorNodes:
         self._emit_runlog(
             merged,
             "agent_created",
-            {"agent_id": manifest.agent_id, "name": manifest.name, "description": manifest.description},
+            {
+                "agent_id": manifest.agent_id,
+                "name": manifest.name,
+                "description": manifest.description,
+                "profile_id": profile["profile_id"],
+                "tools_allowlist": tool_allowlist,
+                "tags": profile["tags"],
+                "skill_md_preview": (skill_content or "")[:500],
+            },
         )
         return merged
 
@@ -439,10 +447,14 @@ class CoordinatorNodes:
 
     def _prepare_phase_pool(self, plan: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
         """Run prepare phase pool."""
+        # Cap number of subtasks to prevent unbounded growth
+        max_subtasks = max(1, self.settings.max_subtasks_per_phase)
+        capped_plan = plan[:max_subtasks]
+
         prefix = "discover" if phase == "discovery" else "execute"
         id_map: dict[str, str] = {}
         used_ids: set[str] = set()
-        for index, item in enumerate(plan, start=1):
+        for index, item in enumerate(capped_plan, start=1):
             original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
             base = original if original.startswith(f"{prefix}-") else f"{prefix}-{original}"
             task_id = base
@@ -454,7 +466,7 @@ class CoordinatorNodes:
             id_map[original] = task_id
 
         pool: list[dict[str, Any]] = []
-        for index, item in enumerate(plan, start=1):
+        for index, item in enumerate(capped_plan, start=1):
             original = str(item.get("task_id", f"task-{index}")).strip() or f"task-{index}"
             task_id = id_map[original]
             deps = []
@@ -479,20 +491,277 @@ class CoordinatorNodes:
     def _format_subtask_result_summary(pools: list[list[dict[str, Any]]]) -> str:
         """Run format subtask result summary."""
         completed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
         for pool in pools:
             completed.extend([item for item in pool if item.get("status") == "completed"])
-        if not completed:
-            return ""
-        return "\n".join(
-            [
-                "Sub-task results:",
-                *[
-                    f"- [{item.get('phase','task')}/{item.get('task_id','')}] "
-                    f"({item.get('role_tag','')}) {item.get('title','')}: {item.get('result','')}"
-                    for item in completed
-                ],
-            ]
-        )
+            failed.extend([item for item in pool if item.get("status") in {"failed", "cancelled"}])
+
+        parts: list[str] = []
+
+        if completed:
+            parts.append("Completed sub-tasks:")
+            parts.extend(
+                f"- [{item.get('phase','task')}/{item.get('task_id','')}] "
+                f"({item.get('role_tag','')}) {item.get('title','')}: {item.get('result','')}"
+                for item in completed
+            )
+
+        if failed:
+            parts.append("\nFailed/Cancelled sub-tasks:" if completed else "Failed/Cancelled sub-tasks:")
+            parts.extend(
+                f"- [{item.get('phase','task')}/{item.get('task_id','')}] "
+                f"({item.get('role_tag','')}) {item.get('title','')}: error={item.get('error','unknown')}"
+                for item in failed
+            )
+
+        if not parts:
+            total = sum(len(p) for p in pools)
+            return f"No sub-tasks completed out of {total} total." if total else "No sub-tasks were generated."
+
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Single-subtask coroutine — designed to run concurrently via
+    # asyncio.gather inside _execute_phase_pool's ready-batch.
+    # ------------------------------------------------------------------
+
+    async def _run_single_subtask(
+        self,
+        *,
+        item: dict[str, Any],
+        state: dict[str, Any],
+        phase: str,
+        pool: list[dict[str, Any]],
+        by_id: dict[str, dict[str, Any]],
+        discovery_results: dict[str, str],
+        approvals: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]],
+        role_agent_map: dict[str, str],
+        created_agents: list[dict[str, Any]],
+        subtask_results: dict[str, str],
+        api_mode: str,
+        max_agents: int,
+        agents_created_counter: list[int],
+    ) -> None:
+        """Execute a single subtask (with retries), to be gathered concurrently.
+
+        Uses per-attempt local lists for tool_events and approvals to avoid
+        cross-contamination when multiple subtasks run in parallel.  Results
+        are merged into the shared lists after each attempt completes.
+        """
+        role_tag = str(item.get("role_tag", "task-operator")) or "task-operator"
+        item["status"] = "in_progress"
+        self._emit_task_pool(state, pool, phase=phase)
+
+        dep_context = {
+            dep: by_id[dep].get("result", "")
+            for dep in item.get("depends_on", [])
+            if dep in by_id
+        }
+        criteria = item.get("acceptance_criteria", [])
+        task_payload = (
+            f"{item.get('description', '')}\n\n"
+            "Acceptance criteria:\n"
+            + "\n".join(f"- {c}" for c in criteria)
+        ).strip()
+        max_attempts = max(1, int(self.settings.subtask_max_attempts))
+        attempt_failures: list[str] = []
+        item["attempts"] = 0
+
+        for attempt_idx in range(1, max_attempts + 1):
+            item["attempts"] = attempt_idx
+            if self._is_cancel_requested(state["run_id"]):
+                item["status"] = "cancelled"
+                item["error"] = "cancelled_by_user"
+                break
+
+            # Agent acquisition — sync code, effectively atomic in asyncio's
+            # single-thread model (no await between check and mutation).
+            if role_tag not in role_agent_map:
+                if agents_created_counter[0] >= max_agents:
+                    item["status"] = "failed"
+                    item["error"] = f"max_agents_per_run_exceeded ({max_agents})"
+                    self._emit_runlog(
+                        state,
+                        "agent_creation_limit_reached",
+                        {"phase": phase, "max_agents": max_agents, "task_id": item.get("task_id")},
+                    )
+                    break
+                agent_id, created = self._acquire_agent_for_role(role_tag, item)
+                role_agent_map[role_tag] = agent_id
+                if created:
+                    agents_created_counter[0] += 1
+                    created_agents.append(created)
+                    self._emit_runlog(
+                        state,
+                        "agent_created_for_role",
+                        {
+                            "agent_id": created["agent_id"],
+                            "name": created["name"],
+                            "description": created["description"],
+                            "role_tag": role_tag,
+                            "profile_id": created.get("profile_id", ""),
+                            "tools_allowlist": created.get("tools_allowlist", []),
+                            "skill_md_preview": (created.get("skill_md", "") or "")[:500],
+                        },
+                    )
+                else:
+                    self._emit_runlog(
+                        state,
+                        "agent_reused_for_role",
+                        {
+                            "agent_id": agent_id,
+                            "role_tag": role_tag,
+                            "task_id": item.get("task_id"),
+                        },
+                    )
+            agent_id = role_agent_map[role_tag]
+            item["assigned_agent_id"] = agent_id
+
+            attempt_task_payload = (
+                f"Subtask attempt {attempt_idx}/{max_attempts}.\n"
+                f"{task_payload}"
+            )
+            req = CoordinatorRequest(
+                session_id=state["session_id"],
+                task=attempt_task_payload,
+                context={
+                    **(state.get("context", {}) or {}),
+                    "parent_task": state["task"],
+                    "task_phase": phase,
+                    "discovery_results": discovery_results,
+                    "subtask": {
+                        "task_id": item["task_id"],
+                        "title": item.get("title", ""),
+                        "phase": phase,
+                        "role_tag": role_tag,
+                        "depends_on_results": dep_context,
+                        "attempt": attempt_idx,
+                        "max_attempts": max_attempts,
+                        "prior_failures": list(attempt_failures),
+                    },
+                },
+                config=self._request_config_for_agent(agent_id),
+            )
+            composed_skill_ids = req.config.get("skill_ids", [])
+            entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
+
+            # Per-attempt local event lists — avoids cross-contamination when
+            # multiple subtasks execute concurrently.
+            attempt_tool_events: list[dict[str, Any]] = []
+            attempt_approvals: list[dict[str, Any]] = []
+
+            if composed_skill_ids:
+                self._emit_runlog(
+                    state,
+                    "skills_composed",
+                    {
+                        "agent_id": agent_id,
+                        "skill_ids": composed_skill_ids,
+                        "task_id": item.get("task_id"),
+                    },
+                )
+            self._emit_runlog(
+                state,
+                "subtask_attempt_started",
+                {
+                    "phase": phase,
+                    "task_id": item.get("task_id"),
+                    "title": item.get("title", ""),
+                    "role_tag": role_tag,
+                    "attempt": attempt_idx,
+                    "max_attempts": max_attempts,
+                    "agent_id": agent_id,
+                    "task_payload": task_payload[:1000],
+                    "depends_on": item.get("depends_on", []),
+                    "dependency_context": {k: v[:300] for k, v in dep_context.items()} if dep_context else {},
+                },
+            )
+            failure_reason = ""
+            try:
+                response = await self.runner.run_agent(
+                    agent_id=agent_id,
+                    entrypoint=entrypoint,
+                    request=req,
+                    approval_callback=lambda intent, a_id, _app=attempt_approvals: self._approval_callback(
+                        intent=intent,
+                        agent_id=a_id,
+                        run_id=state["run_id"],
+                        approvals=_app,
+                        mode=api_mode,
+                    ),
+                    tool_callback=lambda intent, a_id, _te=attempt_tool_events: self._tool_callback(
+                        intent=intent,
+                        agent_id=a_id,
+                        run_id=state["run_id"],
+                        tool_events=_te,
+                    ),
+                )
+                if response.status == "ok":
+                    # Detect agent LLM errors disguised as successful results
+                    if response.result and response.result.strip().startswith("[llm_error:"):
+                        failure_reason = f"agent_llm_failure: {response.result[:200]}"
+                    else:
+                        new_events = attempt_tool_events
+                        verification_ok, verification_msg = self._verify_subtask_tool_execution(
+                            item=item,
+                            new_tool_events=new_events,
+                        )
+                        if verification_ok:
+                            item["status"] = "completed"
+                            item["error"] = ""
+                            item["result"] = response.result
+                            subtask_results[item["task_id"]] = response.result
+                            subtask_results[f"{phase}.{item['task_id']}"] = response.result
+                            self._emit_runlog(
+                                state,
+                                "subtask_attempt_succeeded",
+                                {
+                                    "phase": phase,
+                                    "task_id": item.get("task_id"),
+                                    "title": item.get("title", ""),
+                                    "attempt": attempt_idx,
+                                    "agent_id": agent_id,
+                                    "result": (response.result or "")[:2000],
+                                    "tool_calls_in_attempt": len(new_events),
+                                    "memory_updates": response.memory_updates[:5] if response.memory_updates else [],
+                                },
+                            )
+                            # Merge per-attempt events into shared lists
+                            tool_events.extend(attempt_tool_events)
+                            approvals.extend(attempt_approvals)
+                            break
+                        failure_reason = verification_msg or "filesystem_verification_failed"
+                else:
+                    failure_reason = response.error_message or "subtask_failed"
+            except AgentRuntimeError as exc:
+                failure_reason = str(exc)
+
+            # Merge per-attempt events into shared lists
+            tool_events.extend(attempt_tool_events)
+            approvals.extend(attempt_approvals)
+
+            attempt_failures.append(failure_reason)
+            self._emit_runlog(
+                state,
+                "subtask_attempt_failed",
+                {
+                    "phase": phase,
+                    "task_id": item.get("task_id"),
+                    "attempt": attempt_idx,
+                    "max_attempts": max_attempts,
+                    "agent_id": agent_id,
+                    "error": failure_reason,
+                },
+            )
+            if attempt_idx >= max_attempts:
+                item["status"] = "failed"
+                item["error"] = failure_reason
+
+        if item["status"] not in {"completed", "failed", "cancelled"}:
+            item["status"] = "failed"
+            item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
+        self._emit_task_pool(state, pool, phase=phase)
 
     async def _execute_phase_pool(
         self,
@@ -511,7 +780,24 @@ class CoordinatorNodes:
         """Asynchronously run execute phase pool."""
         by_id = {item["task_id"]: item for item in pool}
         waiting_cycles = 0
+        # Guardrails: limit total iterations and agent creation to prevent infinite loops
+        max_pool_iterations = len(pool) * max(1, int(self.settings.subtask_max_attempts)) + 5
+        max_agents = max(1, self.settings.max_agents_per_run)
+        pool_iteration = 0
+        agents_created_counter: list[int] = [0]   # mutable container for concurrent access
         while True:
+            pool_iteration += 1
+            if pool_iteration > max_pool_iterations:
+                for item in pool:
+                    if item["status"] in {"waiting", "pending", "in_progress"}:
+                        item["status"] = "failed"
+                        item["error"] = "max_pool_iterations_exceeded"
+                self._emit_runlog(
+                    state,
+                    "pool_iteration_limit_reached",
+                    {"phase": phase, "max_iterations": max_pool_iterations},
+                )
+                break
             if self._is_cancel_requested(state["run_id"]):
                 for item in pool:
                     if item["status"] in {"waiting", "pending"}:
@@ -544,149 +830,27 @@ class CoordinatorNodes:
                 item["status"] = "pending" if all(dep in completed_ids for dep in deps) else "waiting"
 
             ready = [t for t in pool if t["status"] == "pending"]
-            for item in ready:
+            if ready:
                 progressed = True
-                role_tag = str(item.get("role_tag", "task-operator")) or "task-operator"
-                item["status"] = "in_progress"
-                self._emit_task_pool(state, pool, phase=phase)
-
-                dep_context = {
-                    dep: by_id[dep].get("result", "")
-                    for dep in item.get("depends_on", [])
-                    if dep in by_id
-                }
-                criteria = item.get("acceptance_criteria", [])
-                task_payload = (
-                    f"{item.get('description', '')}\n\n"
-                    "Acceptance criteria:\n"
-                    + "\n".join(f"- {c}" for c in criteria)
-                ).strip()
-                max_attempts = max(1, int(self.settings.subtask_max_attempts))
-                attempt_failures: list[str] = []
-                item["attempts"] = 0
-
-                for attempt_idx in range(1, max_attempts + 1):
-                    item["attempts"] = attempt_idx
-                    if self._is_cancel_requested(state["run_id"]):
-                        item["status"] = "cancelled"
-                        item["error"] = "cancelled_by_user"
-                        break
-
-                    if role_tag not in role_agent_map:
-                        agent_id, created = self._acquire_agent_for_role(role_tag, item)
-                        role_agent_map[role_tag] = agent_id
-                        if created:
-                            created_agents.append(created)
-                    agent_id = role_agent_map[role_tag]
-                    item["assigned_agent_id"] = agent_id
-
-                    attempt_task_payload = (
-                        f"Subtask attempt {attempt_idx}/{max_attempts}.\n"
-                        f"{task_payload}"
+                await asyncio.gather(*(
+                    self._run_single_subtask(
+                        item=item,
+                        state=state,
+                        phase=phase,
+                        pool=pool,
+                        by_id=by_id,
+                        discovery_results=discovery_results,
+                        approvals=approvals,
+                        tool_events=tool_events,
+                        role_agent_map=role_agent_map,
+                        created_agents=created_agents,
+                        subtask_results=subtask_results,
+                        api_mode=api_mode,
+                        max_agents=max_agents,
+                        agents_created_counter=agents_created_counter,
                     )
-                    req = CoordinatorRequest(
-                        session_id=state["session_id"],
-                        task=attempt_task_payload,
-                        context={
-                            **(state.get("context", {}) or {}),
-                            "parent_task": state["task"],
-                            "task_phase": phase,
-                            "discovery_results": discovery_results,
-                            "subtask": {
-                                "task_id": item["task_id"],
-                                "title": item.get("title", ""),
-                                "phase": phase,
-                                "role_tag": role_tag,
-                                "depends_on_results": dep_context,
-                                "attempt": attempt_idx,
-                                "max_attempts": max_attempts,
-                                "prior_failures": list(attempt_failures),
-                            },
-                        },
-                        config=self._request_config_for_agent(agent_id),
-                    )
-                    entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
-                    tool_events_start = len(tool_events)
-                    self._emit_runlog(
-                        state,
-                        "subtask_attempt_started",
-                        {
-                            "phase": phase,
-                            "task_id": item.get("task_id"),
-                            "attempt": attempt_idx,
-                            "max_attempts": max_attempts,
-                            "agent_id": agent_id,
-                        },
-                    )
-                    try:
-                        response = await self.runner.run_agent(
-                            agent_id=agent_id,
-                            entrypoint=entrypoint,
-                            request=req,
-                            approval_callback=lambda intent, a_id: self._approval_callback(
-                                intent=intent,
-                                agent_id=a_id,
-                                run_id=state["run_id"],
-                                approvals=approvals,
-                                mode=api_mode,
-                            ),
-                            tool_callback=lambda intent, a_id: self._tool_callback(
-                                intent=intent,
-                                agent_id=a_id,
-                                run_id=state["run_id"],
-                                tool_events=tool_events,
-                            ),
-                        )
-                        if response.status == "ok":
-                            new_events = tool_events[tool_events_start:]
-                            verification_ok, verification_msg = self._verify_subtask_tool_execution(
-                                item=item,
-                                new_tool_events=new_events,
-                            )
-                            if verification_ok:
-                                item["status"] = "completed"
-                                item["error"] = ""
-                                item["result"] = response.result
-                                subtask_results[item["task_id"]] = response.result
-                                subtask_results[f"{phase}.{item['task_id']}"] = response.result
-                                self._emit_runlog(
-                                    state,
-                                    "subtask_attempt_succeeded",
-                                    {
-                                        "phase": phase,
-                                        "task_id": item.get("task_id"),
-                                        "attempt": attempt_idx,
-                                        "agent_id": agent_id,
-                                    },
-                                )
-                                break
-                            failure_reason = verification_msg or "filesystem_verification_failed"
-                        else:
-                            failure_reason = response.error_message or "subtask_failed"
-                    except AgentRuntimeError as exc:
-                        failure_reason = str(exc)
-
-                    attempt_failures.append(failure_reason)
-                    self._emit_runlog(
-                        state,
-                        "subtask_attempt_failed",
-                        {
-                            "phase": phase,
-                            "task_id": item.get("task_id"),
-                            "attempt": attempt_idx,
-                            "max_attempts": max_attempts,
-                            "agent_id": agent_id,
-                            "error": failure_reason,
-                        },
-                    )
-                    if attempt_idx >= max_attempts:
-                        item["status"] = "failed"
-                        item["error"] = failure_reason
-
-                if item["status"] not in {"completed", "failed", "cancelled"}:
-                    item["status"] = "failed"
-                    item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
-                self._emit_task_pool(state, pool, phase=phase)
+                    for item in ready
+                ))
 
             if progressed:
                 waiting_cycles = 0
@@ -774,6 +938,7 @@ class CoordinatorNodes:
             api_capabilities=profile.get("api_capabilities", []),
             requires_approval_for=profile.get("requires_approval_for", []),
             skill_content=skill_content,
+            skill_ids=profile.get("skill_ids", []),
         )
         self.registry.upsert_manifest(manifest)
         self._sync_registry_index()
@@ -799,6 +964,7 @@ class CoordinatorNodes:
                 "status": item.get("status"),
                 "assigned_agent_id": item.get("assigned_agent_id"),
                 "error": item.get("error", ""),
+                "result_preview": (item.get("result", "") or "")[:300],
             }
             for item in pool
         ]
@@ -845,6 +1011,16 @@ class CoordinatorNodes:
                 context=state.get("context", {}),
                 config=self._request_config_for_agent(agent_id),
             )
+            composed_skill_ids = req.config.get("skill_ids", [])
+            if composed_skill_ids:
+                self._emit_runlog(
+                    state,
+                    "skills_composed",
+                    {
+                        "agent_id": agent_id,
+                        "skill_ids": composed_skill_ids,
+                    },
+                )
             approvals = list(state.get("approvals", []))
             tool_events = list(state.get("tool_events", []))
             api_mode = (state.get("runtime_policies", {}) or {}).get(
@@ -887,8 +1063,17 @@ class CoordinatorNodes:
                     {
                         "agent_id": agent_id,
                         "status": response.status,
+                        "result": (response.result or "")[:2000],
+                        "error": response.error_message or "",
                         "approvals": len(approvals),
                         "tool_calls": len(tool_events),
+                        "tool_summary": [
+                            {"tool": evt.get("tool"), "ok": evt.get("ok"), "reason": evt.get("reason", "")}
+                            for evt in tool_events[-10:]
+                        ],
+                        "memory_updates": (response.memory_updates or [])[:5],
+                        "artifacts": (response.artifacts or [])[:5],
+                        "latency_ms": response.metrics.latency_ms if response.metrics else 0.0,
                     },
                 )
                 return merged
@@ -927,12 +1112,48 @@ class CoordinatorNodes:
         return state
 
     async def approval_gate_for_api_calls(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run approval gate for api calls."""
-        return state
+        """Evaluate pending api_call_intents that have not yet been decided.
+
+        This node is wired into the graph *before* agent dispatch; it pre-screens
+        any api-call intents the coordinator has accumulated so far so that the
+        ``continue_or_deny_api_path`` edge can route accordingly.
+        """
+        pending = state.get("pending_api_intents", [])
+        if not pending:
+            return self._merge(state, api_calls_approved=True)
+
+        mode = (state.get("runtime_policies", {}) or {}).get(
+            "api_approval_mode", self.settings.api_approval_mode
+        )
+        denied: list[dict[str, Any]] = []
+        for intent_data in pending:
+            req = ApprovalRequest(
+                call_type=intent_data.get("call_type", "external_paid_api"),
+                provider=intent_data.get("provider", ""),
+                endpoint=intent_data.get("endpoint", ""),
+                estimated_cost_usd=float(intent_data.get("estimated_cost_usd", 0)),
+                reason=intent_data.get("reason", ""),
+                session_id=state["run_id"],
+            )
+            decision = self.approval_gate.decide_with_mode(req=req, mode=mode)
+            self.audit.record_approval(req, decision, run_id=state["run_id"], agent_id=None)
+            if not decision.approved:
+                denied.append({"provider": req.provider, "note": decision.note})
+        all_ok = len(denied) == 0
+        self._emit_runlog(state, "api_gate_decision", {"approved": all_ok, "denied": denied})
+        return self._merge(state, api_calls_approved=all_ok, denied_api_calls=denied)
 
     async def continue_or_deny_api_path(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run continue or deny api path."""
-        return state
+        """If any API call was denied, mark the run as soft-failed and explain."""
+        if state.get("api_calls_approved", True):
+            return state
+        denied = state.get("denied_api_calls", [])
+        reason = "; ".join(d.get("note", "denied") for d in denied) or "api_calls_denied"
+        return self._merge(
+            state,
+            response_status="error",
+            response_error=f"api_calls_denied: {reason}",
+        )
 
     async def update_registry_and_audit(self, state: dict[str, Any]) -> dict[str, Any]:
         """Asynchronously run update registry and audit."""
@@ -961,24 +1182,155 @@ class CoordinatorNodes:
             {
                 "status": state.get("response_status", "error"),
                 "agent_id": state.get("selected_agent_id"),
+                "response_result": (state.get("response_result", "") or "")[:3000],
+                "response_error": state.get("response_error", ""),
+                "agents_used": list(state.get("role_agent_map", {}).values())[:20],
+                "created_agents": [
+                    {"agent_id": a.get("agent_id"), "name": a.get("name"), "role_tag": a.get("role_tag", "")}
+                    for a in state.get("created_agents", [])[:10]
+                ],
+                "approval_count": len(state.get("approvals", [])),
+                "tool_event_count": len(state.get("tool_events", [])),
             },
         )
         return state
 
     async def synthesize_final_response(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run synthesize final response."""
-        if state.get("response_status") == "ok":
-            return self._merge(state, response_result=state.get("response_result", ""))
-        return self._merge(
-            state,
-            response_result=(
-                "Unable to complete task via current agents. "
-                f"Reason: {state.get('response_error', 'unknown')}"
-            ),
-        )
+        """Use the LLM to synthesize a coherent final response from subtask results."""
+        raw_result = state.get("response_result", "")
+        status = state.get("response_status", "error")
+
+        # If the run failed entirely, produce a structured error message.
+        if status != "ok":
+            error_detail = state.get('response_error', 'unknown')
+            # Include failed subtask info for context
+            failed_info = []
+            for pool_key in ("discovery_subtask_pool", "execution_subtask_pool"):
+                for item in state.get(pool_key, []):
+                    if item.get("status") in {"failed", "cancelled"}:
+                        failed_info.append(
+                            f"  - {item.get('title', item.get('task_id', '?'))}: "
+                            f"{item.get('error', 'unknown')}"
+                        )
+            error_msg = f"Unable to complete task. Reason: {error_detail}"
+            if failed_info:
+                error_msg += "\n\nFailed sub-tasks:\n" + "\n".join(failed_info)
+            if raw_result:
+                error_msg += f"\n\nPartial results:\n{raw_result}"
+            self._emit_runlog(state, "synthesis_complete", {
+                "llm_synthesized": False,
+                "status": "error",
+                "error_summary": error_msg[:2000],
+            })
+            return self._merge(state, response_result=error_msg)
+
+        # Build pool summary for synthesis input
+        pool_summary = self._format_subtask_result_summary(
+            [state.get("discovery_subtask_pool", []), state.get("execution_subtask_pool", [])]
+        ) or raw_result
+
+        # Attempt LLM synthesis to turn raw subtask outputs into a clean answer.
+        try:
+            from closed_claw.registry.search import _generate_text_with_provider, _provider_key_and_base
+
+            provider = self.settings.llm_provider.lower()
+            key, base = _provider_key_and_base(self.settings, provider)
+            if key and provider not in ("heuristic",):
+
+                prompt = (
+                    "You are the final summarizer for a multi-agent task run.\n"
+                    f"Original task: {state.get('task', '')}\n\n"
+                    f"Sub-task outputs:\n{pool_summary[:4000]}\n\n"
+                    "Write a clear, concise summary of what was accomplished. "
+                    "Include concrete results, files created/modified, and any caveats. "
+                    "Plain text only, no JSON."
+                )
+                synthesized = _generate_text_with_provider(
+                    provider=provider,
+                    model=self.settings.llm_model,
+                    api_key=key,
+                    base_url=base,
+                    timeout_sec=self.settings.llm_timeout_sec,
+                    prompt=prompt,
+                    max_tokens=600,
+                    temperature=0.1,
+                )
+                if synthesized and synthesized.strip():
+                    self._emit_runlog(state, "synthesis_complete", {
+                        "llm_synthesized": True,
+                        "synthesis_preview": synthesized.strip()[:1500],
+                    })
+                    return self._merge(state, response_result=synthesized.strip())
+        except Exception:
+            # LLM synthesis is best-effort; fall back to raw result.
+            pass
+
+        # Ensure we always return something meaningful even without LLM
+        final_result = raw_result or pool_summary or "Task completed but no detailed output was captured."
+        self._emit_runlog(state, "synthesis_complete", {
+            "llm_synthesized": False,
+            "raw_result_preview": (final_result or "")[:1500],
+        })
+        return self._merge(state, response_result=final_result)
 
     async def failure_recovery(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run failure recovery."""
+        """Attempt to recover from a failed run by asking the LLM for a diagnosis.
+
+        If recovery is not possible the error state is preserved as-is so
+        ``synthesize_final_response`` can produce a useful error message.
+        """
+        if state.get("response_status") != "error":
+            return state
+
+        failed_agents = state.get("failed_agents", [])
+        error = state.get("response_error", "unknown")
+
+        # Record the failure for circuit-breaker / audit purposes.
+        self.audit.record_event(
+            "failure_recovery_attempted",
+            {"error": error, "failed_agents": failed_agents},
+            run_id=state["run_id"],
+            agent_id=state.get("selected_agent_id"),
+        )
+        self._emit_runlog(
+            state,
+            "failure_recovery",
+            {"error": error, "failed_agents": failed_agents},
+        )
+
+        # Ask the LLM for a brief diagnosis to aid debugging.
+        try:
+            from closed_claw.registry.search import _generate_text_with_provider, _provider_key_and_base
+
+            provider = self.settings.llm_provider.lower()
+            key, base = _provider_key_and_base(self.settings, provider)
+            if key and provider not in ("heuristic",):
+                prompt = (
+                    "A multi-agent task run has failed.\n"
+                    f"Task: {state.get('task', '')}\n"
+                    f"Error: {error}\n"
+                    f"Failed agents: {json.dumps(failed_agents)}\n\n"
+                    "Write a brief diagnosis (2-3 sentences) explaining the most likely "
+                    "root cause and a concrete suggestion for recovery. Plain text only."
+                )
+                diagnosis = _generate_text_with_provider(
+                    provider=provider,
+                    model=self.settings.llm_model,
+                    api_key=key,
+                    base_url=base,
+                    timeout_sec=self.settings.llm_timeout_sec,
+                    prompt=prompt,
+                    max_tokens=200,
+                    temperature=0.1,
+                )
+                if diagnosis and diagnosis.strip():
+                    return self._merge(
+                        state,
+                        response_error=f"{error} | LLM diagnosis: {diagnosis.strip()}",
+                    )
+        except Exception:
+            pass
+
         return state
 
     async def _approval_callback(
@@ -990,6 +1342,19 @@ class CoordinatorNodes:
         mode: str,
     ) -> ApiCallDecision:
         """Asynchronously run approval callback."""
+        # Auto-approve regular LLM API calls — only gate external/paid non-LLM APIs
+        if intent.call_type in ("llm_api_call", "llm_completion"):
+            decision = ApiCallDecision(approved=True, note="llm_call_auto_approved")
+            approvals.append(
+                {
+                    "provider": intent.provider,
+                    "endpoint": intent.endpoint,
+                    "approved": True,
+                    "note": decision.note,
+                }
+            )
+            return decision
+
         if intent.call_type == "external_paid_api" and intent.provider not in self.settings.paid_api_providers:
             decision = ApiCallDecision(approved=True, note="provider_not_marked_paid")
             approvals.append(
@@ -1046,6 +1411,20 @@ class CoordinatorNodes:
                 "note": human_decision.note,
             }
         )
+        self._emit_runlog(
+            {"run_id": run_id},
+            "approval_decision",
+            {
+                "agent_id": agent_id,
+                "provider": intent.provider,
+                "endpoint": intent.endpoint,
+                "call_type": intent.call_type,
+                "estimated_cost_usd": float(intent.estimated_cost_usd),
+                "reason": intent.reason,
+                "approved": human_decision.approved,
+                "note": human_decision.note,
+            },
+        )
         return ApiCallDecision(approved=human_decision.approved, note=human_decision.note)
 
     async def _tool_callback(
@@ -1087,9 +1466,7 @@ class CoordinatorNodes:
                     "ok": semantic_ok,
                     "reason": intent.reason,
                     "args": intent.args,
-                    "result": {
-                        "returncode": result.get("returncode") if isinstance(result, dict) else None,
-                    },
+                    "result": result,
                     "error": semantic_error,
                 },
             )
@@ -1142,16 +1519,62 @@ class CoordinatorNodes:
                 continue
         AgentFactory.save_registry_index(self.settings.agents_dir / "registry.json", manifests)
 
+    def _compose_system_prompt(self, agent_id: str, manifest: Any | None) -> str:
+        """Build the agent system prompt by composing base skill modules + role overlay.
+
+        Layer 1 — Base skill modules from agents/skills/<skill_id>.md (shared library).
+        Layer 2 — Agent role overlay from agents/<agent_id>/skill.md (identity + rules).
+
+        Combining skills gives the agent broader competence. Each base skill covers
+        a specific capability domain in detail; the role overlay adds identity, decision
+        rules, and output format expectations. When skill_ids is empty, only the role
+        overlay is used. Existing agents with no skill_ids degrade gracefully.
+        """
+        parts: list[str] = []
+
+        # Layer 1: load requested base skill modules from the shared skill library
+        if manifest is not None:
+            skill_ids: list[str] = getattr(manifest, "skill_ids", []) or []
+            if skill_ids:
+                skills_dir = self.settings.agents_dir / "skills"
+                for skill_id in skill_ids:
+                    skill_path = skills_dir / f"{skill_id}.md"
+                    if skill_path.exists():
+                        content = skill_path.read_text(encoding="utf-8").strip()
+                        if content:
+                            parts.append(content)
+
+        # Layer 2: agent role overlay (identity, decision rules, output format)
+        role_path = self.settings.agents_dir / agent_id / "skill.md"
+        if role_path.exists():
+            content = role_path.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(content)
+
+        if not parts:
+            return (
+                "You are a specialist agent inside the Closed Claw orchestrator. "
+                "Execute tasks accurately, use available tools efficiently, "
+                "and report concrete, factual outcomes."
+            )
+
+        return "\n\n---\n\n".join(parts)
+
     def _request_config_for_agent(self, agent_id: str) -> dict[str, Any]:
         """Run request config for agent."""
         manifest = self.registry.get_manifest(agent_id)
         allowlist = manifest.tools_allowlist if manifest else []
+        skill_ids = getattr(manifest, "skill_ids", []) or [] if manifest else []
+        system_prompt = self._compose_system_prompt(agent_id, manifest)
         return {
             "timeout_s": self.settings.agent_timeout_sec,
-            "agent_loop_max_steps": 12,
+            "agent_loop_max_steps": min(12, self.settings.max_tool_calls_per_agent),
             "agent_loop_llm_retries": 2,
             "agent_loop_max_consecutive_errors": 4,
+            "max_tool_calls_per_agent": self.settings.max_tool_calls_per_agent,
             "tool_registry": tool_registry_for_allowlist(allowlist),
+            "system_prompt": system_prompt,
+            "skill_ids": skill_ids,
             "llm": self._llm_runtime_config(),
         }
 
@@ -1169,6 +1592,9 @@ class CoordinatorNodes:
         elif provider == "claude":
             key = key or self.settings.anthropic_api_key.strip()
             base_url = self.settings.anthropic_base_url
+        elif provider == "siemens":
+            key = key or self.settings.siemens_api_key.strip()
+            base_url = self.settings.siemens_base_url
         return {
             "provider": provider,
             "model": self.settings.llm_model,

@@ -1,0 +1,1864 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Closed Claw</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: { claw: { DEFAULT: '#14b8a6', dark: '#0f766e', light: '#5eead4' } }
+      }
+    }
+  }
+</script>
+<style>
+  body { background: #0f172a; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-track { background: #1e293b; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  .card { background: rgb(30 41 59); border-radius: .75rem; border: 1px solid rgb(51 65 85 / .6); padding: 1rem; }
+  .chip { display: inline-flex; align-items: center; padding: .125rem .5rem; border-radius: .25rem; font-size: .75rem; font-weight: 600; border: 1px solid transparent; }
+  .chip-ok { background: rgb(6 78 59 / .4); color: rgb(110 231 183); border-color: rgb(6 95 70 / .5); }
+  .chip-warn { background: rgb(113 63 18 / .4); color: rgb(253 224 71); border-color: rgb(161 98 7 / .5); }
+  .chip-bad { background: rgb(127 29 29 / .4); color: rgb(252 165 165); border-color: rgb(185 28 28 / .5); }
+  .chip-info { background: rgb(30 58 138 / .4); color: rgb(147 197 253); border-color: rgb(29 78 216 / .5); }
+  .chip-neutral { background: rgb(51 65 85 / .5); color: rgb(203 213 225); border-color: rgb(71 85 105 / .5); }
+  .btn { display: inline-flex; align-items: center; gap: .5rem; padding: .375rem .75rem; border-radius: .5rem; font-size: .875rem; font-weight: 500; transition: all .15s ease; }
+  .btn-primary { background: rgb(15 118 110); color: #fff; }
+  .btn-primary:hover { background: rgb(13 148 136); }
+  .btn-ghost { background: rgb(51 65 85); color: rgb(226 232 240); }
+  .btn-ghost:hover { background: rgb(71 85 105); }
+  .btn-danger { background: rgb(185 28 28); color: #fff; }
+  .btn-danger:hover { background: rgb(220 38 38); }
+  .btn-soft { background: rgb(51 65 85 / .6); color: rgb(226 232 240); }
+  .btn-soft:hover { background: rgb(71 85 105); }
+  .nav-item { display: flex; align-items: center; gap: .625rem; padding: .5rem .75rem; border-radius: .5rem; font-size: .875rem; color: rgb(203 213 225); cursor: pointer; }
+  .nav-item:hover { background: rgb(51 65 85 / .6); }
+  .nav-item.active { background: rgb(19 78 74 / .6); border: 1px solid rgb(15 118 110 / .5); color: rgb(94 234 212); }
+  .view { display: none; }
+  .view.active { display: block; }
+  .table-head { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: rgb(148 163 184); font-weight: 600; padding: .625rem .75rem; text-align: left; background: rgb(30 41 59); }
+  .table-cell { font-size: .875rem; color: rgb(226 232 240); padding: .625rem .75rem; vertical-align: top; }
+  .table-row { border-bottom: 1px solid rgb(51 65 85 / .5); }
+  .table-row:hover { background: rgb(51 65 85 / .3); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .compact .table-cell { padding-top: .375rem; padding-bottom: .375rem; font-size: .75rem; }
+  .compact .table-head { padding-top: .375rem; padding-bottom: .375rem; }
+  .compact .card { padding: .75rem; }
+  .drawer { transform: translateX(100%); transition: transform .2s ease; }
+  .drawer.open { transform: translateX(0); }
+  .modal-bg { background: rgba(2,6,23,.72); }
+  .sticky-head th { position: sticky; top: 0; z-index: 2; }
+  .timeline-dot { width: 10px; height: 10px; border-radius: 9999px; }
+</style>
+</head>
+<body class="text-slate-100 min-h-screen">
+<div id="app" class="min-h-screen flex">
+  <aside class="w-64 bg-slate-900 border-r border-slate-700/60 flex flex-col sticky top-0 h-screen">
+    <div class="px-4 py-4 border-b border-slate-700/60">
+      <div class="flex items-center gap-2.5">
+        <span class="text-2xl">🦞</span>
+        <div>
+          <div class="font-bold text-white leading-tight">Closed Claw</div>
+          <div class="text-xs text-teal-300">Workflow Console</div>
+        </div>
+      </div>
+    </div>
+    <nav class="flex-1 px-2 py-4 space-y-1" id="left-nav"></nav>
+    <div class="px-3 pb-3 text-xs text-slate-500">
+      <div id="live-indicator" class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+        <span>Live updates</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="flex-1 min-w-0 flex flex-col">
+    <header class="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-700/60 px-5 py-3">
+      <div class="flex items-center gap-3">
+        <div class="relative flex-1">
+          <input id="global-search" type="text" placeholder="Search Run ID / Agent ID / tool / keyword"
+            class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm placeholder-slate-500 focus:outline-none focus:border-teal-500" />
+          <div id="search-results" class="hidden absolute left-0 right-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg max-h-80 overflow-auto z-40"></div>
+        </div>
+        <select id="time-range" class="bg-slate-800 border border-slate-600 rounded-lg px-2 py-2 text-xs">
+          <option value="15m">15m</option>
+          <option value="1h">1h</option>
+          <option value="6h">6h</option>
+          <option value="24h" selected>24h</option>
+          <option value="7d">7d</option>
+          <option value="all">All</option>
+        </select>
+        <select id="density" class="bg-slate-800 border border-slate-600 rounded-lg px-2 py-2 text-xs">
+          <option value="comfortable" selected>Comfortable</option>
+          <option value="compact">Compact</option>
+        </select>
+        <button id="approval-badge" class="btn btn-ghost hidden" onclick="toggleApprovalsDrawer(true)">Approval required (0)</button>
+        <div id="system-pill" class="chip chip-neutral">Offline</div>
+        <button class="btn btn-primary" onclick="openNewRunModal()">New Run</button>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-auto p-5 space-y-5" id="main">
+      <section id="view-overview" class="view active"></section>
+      <section id="view-active-runs" class="view"></section>
+      <section id="view-runs" class="view"></section>
+      <section id="view-run-detail" class="view"></section>
+      <section id="view-agents" class="view"></section>
+      <section id="view-agent-detail" class="view"></section>
+      <section id="view-approvals" class="view"></section>
+      <section id="view-audit" class="view"></section>
+      <section id="view-tools" class="view"></section>
+      <section id="view-skills" class="view"></section>
+      <section id="view-skill-detail" class="view"></section>
+      <section id="view-settings" class="view"></section>
+      <section id="view-health" class="view"></section>
+    </main>
+  </div>
+</div>
+
+<div id="approvals-drawer-bg" class="hidden fixed inset-0 modal-bg z-40" onclick="toggleApprovalsDrawer(false)"></div>
+<aside id="approvals-drawer" class="drawer fixed right-0 top-0 h-full w-[32rem] max-w-full bg-slate-900 border-l border-slate-700/60 z-50 flex flex-col">
+  <div class="px-4 py-3 border-b border-slate-700/60 flex items-center justify-between">
+    <div>
+      <div class="font-semibold">Approvals</div>
+      <div class="text-xs text-slate-400">Operational interrupts</div>
+    </div>
+    <button class="btn btn-ghost" onclick="toggleApprovalsDrawer(false)">Close</button>
+  </div>
+  <div id="drawer-approvals-content" class="p-4 overflow-auto flex-1"></div>
+</aside>
+
+<div id="new-run-modal-bg" class="hidden fixed inset-0 modal-bg z-40" onclick="closeNewRunModal()"></div>
+<div id="new-run-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="w-full max-w-2xl bg-slate-900 border border-slate-700 rounded-xl">
+    <div class="px-4 py-3 border-b border-slate-700/60 flex items-center justify-between">
+      <div>
+        <div class="font-semibold">New Run</div>
+        <div class="text-xs text-slate-400">Fast launch with safe defaults</div>
+      </div>
+      <button class="btn btn-ghost" onclick="closeNewRunModal()">Close</button>
+    </div>
+    <div class="p-4 space-y-3 max-h-[80vh] overflow-auto">
+      <div>
+        <label class="text-xs text-slate-400 block mb-1">Task / Prompt</label>
+        <textarea id="new-task" rows="4" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="Describe the run objective..."></textarea>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Agent</label>
+          <select id="new-agent" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm"></select>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Tool preset</label>
+          <select id="new-tool-preset" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+            <option value="safe" selected>Safe defaults</option>
+            <option value="balanced">Balanced</option>
+            <option value="full">Full access</option>
+          </select>
+        </div>
+      </div>
+
+      <details class="bg-slate-800/70 rounded-lg border border-slate-700/60 p-3">
+        <summary class="cursor-pointer text-sm text-slate-200">Power options</summary>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Model</label>
+            <input id="new-model" type="text" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="Optional override" />
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Temperature</label>
+              <input id="new-temperature" type="number" step="0.1" min="0" max="2" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm" placeholder="0.2" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Max tokens</label>
+              <input id="new-max-tokens" type="number" min="1" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm" placeholder="1024" />
+            </div>
+          </div>
+          <div class="md:col-span-2">
+            <label class="text-xs text-slate-400 block mb-1">Allowed tools</label>
+            <div id="new-tools-list" class="grid grid-cols-2 md:grid-cols-3 gap-2"></div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Workspace scope</label>
+            <input id="new-workspace" type="text" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="Optional path scope" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Tags</label>
+            <input id="new-tags" type="text" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="ops, nightly" />
+          </div>
+          <div class="md:col-span-2 flex items-center gap-4 text-sm">
+            <label class="inline-flex items-center gap-2"><input id="new-dry-run" type="checkbox" /> Dry-run / validation mode</label>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="px-4 py-3 border-t border-slate-700/60 flex items-center justify-between">
+      <div id="new-run-error" class="text-xs text-red-400"></div>
+      <div class="flex items-center gap-2">
+        <button class="btn btn-ghost" onclick="closeNewRunModal()">Cancel</button>
+        <button id="new-run-submit" class="btn btn-primary" onclick="submitNewRun()">Start Run</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden fixed bottom-4 right-4 z-[60] bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm"></div>
+
+<script>
+const state = {
+  view: 'overview',
+  range: '24h',
+  density: 'comfortable',
+  nav: [],
+  agents: [],
+  runs: [],
+  runsEnriched: [],
+  activeRuns: [],
+  tools: [],
+  audits: [],
+  approvals: [],
+  runAnalysisCache: {},
+  runLiveEvents: {},
+  runLogStreams: {},
+  selectedRunId: null,
+  selectedRunDetailId: null,
+  selectedAgentId: null,
+  systemStatus: { status: 'offline', checks: {} },
+  runFilters: {
+    search: '', status: 'all', agent: 'all', stage: 'all', tool: 'all',
+    sort: 'created_desc', preset: 'none'
+  },
+  auditFilter: '',
+  skills: [],
+  skillDetail: null,
+  settingsCatalog: [],
+};
+
+const NAV_ITEMS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'active-runs', label: 'Active Runs', dynamic: true },
+  { key: 'runs', label: 'Runs' },
+  { key: 'agents', label: 'Agents' },
+  { key: 'approvals', label: 'Approvals', dynamic: true },
+  { key: 'audit', label: 'Audit / Events' },
+  { key: 'tools', label: 'Tools' },
+  { key: 'skills', label: 'Skills' },
+  { key: 'settings', label: 'Settings' },
+  { key: 'health', label: 'System Health' },
+];
+
+const PIPELINE = ['ingest_task', 'decompose_task', 'execute_task_pool', 'validate_outputs', 'update_registry_and_audit', 'synthesize_final_response'];
+
+function $(id) { return document.getElementById(id); }
+function esc(v) { return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function shortId(v) { return v ? String(v).slice(0, 10) : '–'; }
+function fmtTime(v) { if (!v) return '–'; try { return new Date(v).toLocaleString(); } catch { return v; } }
+function fmtDur(ms) { if (ms == null || Number.isNaN(ms)) return '–'; return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`; }
+function ago(v) {
+  if (!v) return '–';
+  const d = new Date(v).getTime();
+  if (!Number.isFinite(d)) return '–';
+  const sec = Math.max(0, Math.floor((Date.now() - d) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const m = Math.floor(sec / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+function statusChip(s) {
+  const k = String(s || 'unknown').toLowerCase();
+  const map = {
+    ok: 'chip-ok', completed: 'chip-ok', active: 'chip-ok', connected: 'chip-ok', approved: 'chip-ok',
+    running: 'chip-info', in_progress: 'chip-info',
+    pending: 'chip-warn', waiting: 'chip-warn', degraded: 'chip-warn',
+    failed: 'chip-bad', error: 'chip-bad', denied: 'chip-bad', offline: 'chip-bad', cancelled: 'chip-bad',
+  };
+  const cls = map[k] || 'chip-neutral';
+  return `<span class="chip ${cls}">${esc(s || 'unknown')}</span>`;
+}
+function toast(msg, variant = 'info') {
+  const el = $('toast');
+  const tone = variant === 'error' ? 'text-red-300 border-red-700/60' : variant === 'ok' ? 'text-emerald-300 border-emerald-700/60' : 'text-slate-200 border-slate-600';
+  el.className = `fixed bottom-4 right-4 z-[60] bg-slate-900 ${tone} border rounded-lg px-4 py-3 text-sm`;
+  el.innerHTML = msg;
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 3000);
+}
+async function api(path, opts = undefined) {
+  try {
+    const res = await fetch(path, opts);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+async function copyText(v) {
+  try { await navigator.clipboard.writeText(v); toast('Copied', 'ok'); } catch { toast('Copy failed', 'error'); }
+}
+
+function setDensity(mode) {
+  state.density = mode;
+  if (mode === 'compact') document.body.classList.add('compact');
+  else document.body.classList.remove('compact');
+}
+
+function setView(view) {
+  if (state.view === 'run-detail' && view !== 'run-detail') {
+    stopRunLogStream(state.selectedRunDetailId);
+  }
+  state.view = view;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const panel = $(`view-${view}`);
+  if (panel) panel.classList.add('active');
+  renderNav();
+  refreshView();  // fetch data for the new view immediately
+}
+
+function renderNav() {
+  const pending = state.approvals.length;
+  const activeCount = state.activeRuns.filter(r => String(r.status) === 'running').length;
+  state.nav = NAV_ITEMS.filter(item => {
+    if (item.key === 'active-runs') return activeCount > 0 || state.view === 'active-runs';
+    if (item.key !== 'approvals') return true;
+    return pending > 0 || state.view === 'approvals';
+  });
+  $('left-nav').innerHTML = state.nav.map(item => {
+    const active = item.key === state.view ? 'active' : '';
+    const badge = item.key === 'approvals'
+      ? `<span class="ml-auto ${pending > 0 ? '' : 'text-slate-500'}">${pending > 0 ? pending : 'No pending'}</span>`
+      : item.key === 'active-runs'
+        ? `<span class="ml-auto ${activeCount > 0 ? 'text-teal-300' : 'text-slate-500'}">${activeCount > 0 ? activeCount : ''}</span>`
+        : '';
+    return `<div class="nav-item ${active}" onclick="setView('${item.key}')">${esc(item.label)}${badge}</div>`;
+  }).join('');
+}
+
+function filterByRange(items, tsKey = 'created_at') {
+  const range = state.range;
+  if (range === 'all') return items;
+  const now = Date.now();
+  const map = { '15m': 15 * 60e3, '1h': 60 * 60e3, '6h': 6 * 60 * 60e3, '24h': 24 * 60 * 60e3, '7d': 7 * 24 * 60 * 60e3 };
+  const windowMs = map[range] || map['24h'];
+  return items.filter(it => {
+    const t = new Date(it?.[tsKey] || it?.ts || 0).getTime();
+    return Number.isFinite(t) && now - t <= windowMs;
+  });
+}
+
+// ── Smart updates: SSE for live push + on-demand fetch ──────────────
+// Global SSE stream pushes active-run status and approval count changes.
+// Heavy endpoints (runs/enriched, agents, audit) are fetched only when
+// the user navigates to the view that needs them — NOT on a timer.
+let _globalSSE = null;
+let _sseConnected = false;
+const POLL_FALLBACK_MS = 60000;  // fallback poll only when SSE is down
+let _pollTimer = null;
+
+function _startFallbackPoll() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(async () => {
+    if (_sseConnected) return;  // SSE recovered — skip
+    await refreshCore();
+    if (['overview', 'active-runs'].includes(state.view)) await refreshView();
+  }, POLL_FALLBACK_MS);
+}
+function _stopFallbackPoll() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+function connectGlobalSSE() {
+  if (_globalSSE) return;
+  if (typeof EventSource === 'undefined') { _startFallbackPoll(); return; }
+  _globalSSE = new EventSource('/api/events/stream');
+  _globalSSE.onopen = () => {
+    _sseConnected = true;
+    _stopFallbackPoll();  // SSE is live — no need to poll
+  };
+  _globalSSE.onmessage = (evt) => {
+    let data;
+    try { data = JSON.parse(evt.data); } catch { return; }
+    if (data.event === 'stream_end') {
+      _globalSSE.close(); _globalSSE = null;
+      _sseConnected = false; _startFallbackPoll();
+      return;
+    }
+    // Update lightweight state without re-fetching heavy endpoints
+    const prevActive = state.activeRuns.filter(r => String(r.status) === 'running').length;
+    state.activeRuns = data.active_runs || [];
+    const nowActive = state.activeRuns.filter(r => String(r.status) === 'running').length;
+    const approvalCount = data.pending_approvals || 0;
+    const approvalChanged = approvalCount !== state.approvals.length;
+
+    renderNav();
+    renderApprovalsBadge();
+
+    // Fetch full approval details if count changed (SSE only pushes count)
+    if (approvalChanged) {
+      api('/api/approvals/pending').then(a => { state.approvals = a || []; renderApprovalsBadge(); });
+    }
+
+    // If active run count changed, re-render relevant views
+    if (prevActive !== nowActive || approvalChanged) {
+      if (state.view === 'overview') refreshView();
+      if (state.view === 'active-runs') renderActiveRuns();
+    }
+    // If a run just finished, refresh the current view to pick up new data
+    if (prevActive > 0 && nowActive === 0) refreshView();
+  };
+  _globalSSE.onerror = () => {
+    _globalSSE.close();
+    _globalSSE = null;
+    _sseConnected = false;
+    _startFallbackPoll();  // SSE lost — enable fallback polling
+    // Retry SSE connection after a delay
+    setTimeout(connectGlobalSSE, 15000);
+  };
+}
+
+async function refreshCore() {
+  // Only fetch what SSE doesn't cover: approvals detail + system status + health
+  const [approvals, sysStatus, health] = await Promise.all([
+    api('/api/approvals/pending'),
+    api('/api/system/status'),
+    api('/api/health'),
+  ]);
+  state.approvals = approvals || [];
+  state.systemStatus = sysStatus || { status: 'offline', checks: {} };
+  updateTopHeader(health);
+  renderNav();
+  renderApprovalsBadge();
+}
+
+async function refreshView() {
+  // Fetch only the data the current view actually renders
+  const v = state.view;
+  const fetches = [];
+  const keys    = [];
+
+  if (v === 'overview' || v === 'runs' || v === 'run-detail') {
+    fetches.push(api('/api/runs?limit=500'));
+    keys.push('runs');
+    fetches.push(api(`/api/runs/enriched?limit=500&range=${encodeURIComponent(state.range)}`));
+    keys.push('runsEnriched');
+  }
+  if (v === 'overview' || v === 'agents' || v === 'run-detail') {
+    fetches.push(api('/api/agents?limit=500'));
+    keys.push('agents');
+  }
+  if (v === 'overview' || v === 'tools') {
+    fetches.push(api('/api/tools'));
+    keys.push('tools');
+  }
+  if (v === 'audit') {
+    fetches.push(api('/api/audit?limit=500'));
+    keys.push('audits');
+  }
+  if (v === 'skills' || v === 'skill-detail' || v === 'agents' || v === 'agent-detail') {
+    fetches.push(api('/api/skills'));
+    keys.push('skills');
+  }
+  if (v === 'settings') {
+    fetches.push(api('/api/settings'));
+    keys.push('settingsCatalog');
+  }
+
+  if (fetches.length) {
+    const results = await Promise.all(fetches);
+    keys.forEach((k, i) => { state[k] = results[i] || []; });
+  }
+  renderCurrentView();
+  renderSearchIndex();
+}
+
+async function refreshAll() {
+  await refreshCore();
+  await refreshView();
+}
+
+function updateTopHeader(health) {
+  const status = state.systemStatus.status || 'offline';
+  $('system-pill').innerHTML = statusChip(status[0].toUpperCase() + status.slice(1));
+  const approvalBtn = $('approval-badge');
+  if (state.approvals.length > 0) {
+    approvalBtn.classList.remove('hidden');
+    approvalBtn.textContent = `Approval required (${state.approvals.length})`;
+  } else {
+    approvalBtn.classList.add('hidden');
+  }
+  const dot = $('live-indicator').querySelector('span');
+  if (!health) dot.className = 'w-2 h-2 rounded-full bg-red-400';
+  else if (status === 'connected') dot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+  else if (status === 'degraded') dot.className = 'w-2 h-2 rounded-full bg-yellow-400';
+  else dot.className = 'w-2 h-2 rounded-full bg-red-400';
+}
+
+function runMetrics() {
+  const runs = filterByRange(state.runsEnriched, 'created_at');
+  const active = runs.filter(r => String(r.status) === 'running').length;
+  const failed = runs.filter(r => ['error', 'failed'].includes(String(r.status))).length;
+  const ok = runs.filter(r => ['ok', 'completed'].includes(String(r.status))).length;
+  const pending = state.approvals.length;
+  const latencies = runs.map(r => Number(r.latency_ms)).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  const p95 = latencies.length ? latencies[Math.floor(Math.max(0, Math.min(latencies.length - 1, Math.ceil(latencies.length * 0.95) - 1)))] : null;
+  return {
+    total: runs.length,
+    active,
+    queued: Math.max(0, runs.filter(r => ['pending', 'waiting'].includes(String(r.status))).length),
+    failed,
+    ok,
+    errorRate: runs.length ? Math.round((failed / runs.length) * 1000) / 10 : 0,
+    p95,
+    pending,
+  };
+}
+
+function pipelineStats() {
+  const runs = filterByRange(state.runsEnriched, 'created_at');
+  const out = {};
+  for (const stage of PIPELINE) out[stage] = { total: 0, failed: 0 };
+  for (const r of runs) {
+    const s = r.current_stage || 'ingest_task';
+    if (!out[s]) out[s] = { total: 0, failed: 0 };
+    out[s].total += 1;
+    if (r.failed_stage && out[r.failed_stage]) out[r.failed_stage].failed += 1;
+  }
+  return out;
+}
+
+function buildActivityFeed() {
+  const items = [];
+  for (const r of filterByRange(state.runsEnriched, 'created_at').slice(0, 40)) {
+    const event = ['error', 'failed'].includes(String(r.status)) ? 'Run failed' : ['ok', 'completed'].includes(String(r.status)) ? 'Run finished' : 'Run started';
+    items.push({
+      ts: r.created_at,
+      kind: 'run',
+      title: event,
+      run_id: r.run_id,
+      subtitle: r.task,
+      details: { status: r.status, stage: r.current_stage, reason: r.failure_reason || '' },
+      severity: ['error', 'failed'].includes(String(r.status)) ? 'bad' : ['ok', 'completed'].includes(String(r.status)) ? 'ok' : 'info',
+    });
+  }
+  for (const a of filterByRange(state.audits, 'created_at').slice(0, 40)) {
+    const t = String(a.event_type || 'event');
+    const sev = t.includes('deny') || t.includes('error') ? 'bad' : t.includes('approve') ? 'ok' : 'warn';
+    items.push({
+      ts: a.created_at,
+      kind: 'audit',
+      title: `Audit: ${t}`,
+      run_id: a.run_id,
+      subtitle: a.agent_id || '',
+      details: a.payload || {},
+      severity: sev,
+    });
+  }
+  for (const p of state.approvals) {
+    const rd = p.request_data || {};
+    items.push({
+      ts: p.created_at,
+      kind: 'approval',
+      title: 'Approval requested',
+      run_id: p.run_id,
+      subtitle: rd.type === 'agent_create' ? 'Agent creation' : `${rd.provider || 'api'} ${rd.endpoint || ''}`,
+      details: rd,
+      severity: 'warn',
+    });
+  }
+  return items
+    .filter(i => i.ts)
+    .sort((a, b) => new Date(b.ts) - new Date(a.ts))
+    .slice(0, 60);
+}
+
+function metricCard(title, value, sub, onClick) {
+  return `<button onclick="${onClick}" class="card text-left hover:border-teal-600/60 transition-colors">
+    <div class="text-xs uppercase tracking-wider text-slate-400">${esc(title)}</div>
+    <div class="text-2xl font-bold mt-1">${esc(value)}</div>
+    <div class="text-xs text-slate-500 mt-1">${esc(sub)}</div>
+  </button>`;
+}
+
+function renderOverview() {
+  const metrics = runMetrics();
+  const pipe = pipelineStats();
+  const toolFailureMap = {};
+  for (const a of state.audits) {
+    const payloadText = JSON.stringify(a.payload || {}).toLowerCase();
+    if (String(a.event_type || '').includes('error') && payloadText.includes('tool')) {
+      for (const t of state.tools.map(x => x.name)) {
+        if (payloadText.includes(String(t).toLowerCase())) toolFailureMap[t] = (toolFailureMap[t] || 0) + 1;
+      }
+    }
+  }
+  const topToolFailure = Object.entries(toolFailureMap).sort((a, b) => b[1] - a[1])[0];
+
+  const failedLastHour = filterByRange(state.runsEnriched, 'created_at').filter(r => ['error', 'failed'].includes(String(r.status))).length;
+  const stuck = state.runsEnriched.filter(r => {
+    if (String(r.status) !== 'running') return false;
+    const t = new Date(r.created_at || 0).getTime();
+    return Number.isFinite(t) && Date.now() - t > 10 * 60 * 1000;
+  }).length;
+
+  $('view-overview').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Overview</h1>
+        <p class="text-sm text-slate-400 mt-1">Is it healthy? What needs attention? What just happened?</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        ${metricCard('Connection status', state.systemStatus.status || 'offline', 'LLM / tool backend / coordinator', "setView('health')")}
+        ${metricCard('Active / Queued', `${metrics.active} / ${metrics.queued}`, 'Open Runs triage', "applyRunPreset('running_now')")}
+        ${metricCard(`Error rate (${state.range})`, `${metrics.errorRate}%`, 'Failed share of runs', "applyRunPreset('failed_1h')")}
+        ${metricCard('P95 duration', fmtDur(metrics.p95), 'Last window', "setView('runs')")}
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
+        <div class="card xl:col-span-2">
+          <div class="flex items-center justify-between mb-3">
+            <div class="font-semibold">Attention Required</div>
+            <button class="btn btn-ghost" onclick="setView('runs')">Open Runs</button>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button onclick="applyRunPreset('failed_1h')" class="text-left p-3 rounded-lg border border-red-700/40 bg-red-900/10 hover:bg-red-900/20">
+              <div class="text-sm text-red-300 font-semibold">${failedLastHour} failing runs (${state.range})</div>
+              <div class="text-xs text-slate-400 mt-1">View failed runs</div>
+            </button>
+            <button onclick="applyRunPreset('running_now')" class="text-left p-3 rounded-lg border border-yellow-700/40 bg-yellow-900/10 hover:bg-yellow-900/20">
+              <div class="text-sm text-yellow-300 font-semibold">${stuck} runs stuck &gt; 10m</div>
+              <div class="text-xs text-slate-400 mt-1">View long-running runs</div>
+            </button>
+            <button onclick="toggleApprovalsDrawer(true)" class="text-left p-3 rounded-lg border border-yellow-700/40 bg-slate-700/40 hover:bg-slate-700/60">
+              <div class="text-sm text-yellow-300 font-semibold">${state.approvals.length} pending approval${state.approvals.length === 1 ? '' : 's'}</div>
+              <div class="text-xs text-slate-400 mt-1">Open approvals drawer</div>
+            </button>
+            <button onclick="setView('audit')" class="text-left p-3 rounded-lg border border-blue-700/40 bg-blue-900/10 hover:bg-blue-900/20">
+              <div class="text-sm text-blue-300 font-semibold">Tool failures: ${esc(topToolFailure ? `${topToolFailure[0]} (${topToolFailure[1]})` : 'none')}</div>
+              <div class="text-xs text-slate-400 mt-1">Open filtered events</div>
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="font-semibold mb-3">Launchpad</div>
+          <div class="space-y-2">
+            <button class="btn btn-primary w-full justify-center" onclick="openNewRunModal()">New Run</button>
+            <select id="run-template" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm" onchange="runFromTemplate(this.value)">
+              <option value="">Run from template</option>
+              <option value="Summarize the latest failed runs and suggest root causes.">Failure summary</option>
+              <option value="Check system health and list critical blockers.">Health check</option>
+              <option value="Review pending approvals and propose safe defaults.">Approval triage</option>
+            </select>
+            <button class="btn btn-ghost w-full justify-center" onclick="rerunLastSuccessful()">Re-run last successful</button>
+            <button class="btn btn-soft w-full justify-center" onclick="openLastFailed()">Open last failed run</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <div class="font-semibold">Recent Activity</div>
+          <button class="btn btn-ghost" onclick="setView('audit')">Open Audit / Events</button>
+        </div>
+        <div class="space-y-2 max-h-[28rem] overflow-auto" id="activity-feed">
+          ${renderActivityTimeline(buildActivityFeed())}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <div class="font-semibold">Pipeline Health</div>
+          <div class="text-xs text-slate-500">Click a stage to filter runs</div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+          ${PIPELINE.map(stage => {
+            const stat = pipe[stage] || { total: 0, failed: 0 };
+            const sev = stat.failed > 0 ? 'border-red-700/50 bg-red-900/10' : 'border-slate-700/60 bg-slate-800';
+            return `<button onclick="filterRunsByStage('${stage}')" class="text-left p-3 rounded-lg border ${sev} hover:border-teal-700/60">
+              <div class="mono text-xs text-teal-300">${esc(stage)}</div>
+              <div class="text-sm mt-1">${stat.total} runs</div>
+              <div class="text-xs ${stat.failed > 0 ? 'text-red-300' : 'text-slate-500'}">${stat.failed} failures</div>
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderActivityTimeline(items) {
+  if (!items.length) return '<div class="text-sm text-slate-500 py-6 text-center">No recent activity.</div>';
+  return items.map((item, idx) => {
+    const color = item.severity === 'bad' ? 'bg-red-400' : item.severity === 'ok' ? 'bg-emerald-400' : item.severity === 'warn' ? 'bg-yellow-400' : 'bg-blue-400';
+    return `<div class="border border-slate-700/60 rounded-lg p-3">
+      <div class="flex items-start gap-3">
+        <span class="timeline-dot ${color} mt-1"></span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center justify-between gap-2">
+            <div class="font-medium text-sm">${esc(item.title)}</div>
+            <div class="text-xs text-slate-500">${ago(item.ts)}</div>
+          </div>
+          <div class="text-xs text-slate-400 mt-0.5 truncate">${esc(item.subtitle || '')}</div>
+          <div class="mt-2 flex items-center gap-2">
+            ${item.run_id ? `<button class="btn btn-ghost" onclick="openRunDetail('${esc(item.run_id)}')">Open run</button>` : ''}
+            <button class="btn btn-soft" onclick="toggleActivityDetails(${idx})">Peek details</button>
+          </div>
+          <pre id="activity-detail-${idx}" class="hidden mt-2 text-xs bg-slate-900 rounded-lg border border-slate-700/50 p-2 overflow-auto max-h-36 mono">${esc(JSON.stringify(item.details, null, 2))}</pre>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleActivityDetails(i) {
+  const el = $(`activity-detail-${i}`);
+  if (el) el.classList.toggle('hidden');
+}
+
+function applyRunPreset(preset) {
+  state.runFilters.preset = preset;
+  if (preset === 'failed_1h') {
+    state.runFilters.status = 'error';
+    state.range = '1h';
+    $('time-range').value = '1h';
+  } else if (preset === 'running_now') {
+    state.runFilters.status = 'running';
+  } else if (preset === 'my_agent') {
+    state.runFilters.agent = state.agents[0]?.agent_id || 'all';
+  }
+  setView('runs');
+}
+
+function filterRunsByStage(stage) {
+  state.runFilters.stage = stage;
+  setView('runs');
+}
+
+function runFromTemplate(text) {
+  if (!text) return;
+  openNewRunModal();
+  $('new-task').value = text;
+  $('run-template').value = '';
+}
+
+async function rerunLastSuccessful() {
+  const run = state.runsEnriched.find(r => ['ok', 'completed'].includes(String(r.status)));
+  if (!run) return toast('No successful run found', 'error');
+  await triggerRun({ task: run.task || 'Repeat last successful run', context: { rerun_of: run.run_id } });
+}
+
+function openLastFailed() {
+  const run = state.runsEnriched.find(r => ['error', 'failed'].includes(String(r.status)));
+  if (!run) return toast('No failed run found', 'error');
+  openRunDetail(run.run_id);
+}
+
+function renderActiveRuns() {
+  const active = state.activeRuns.filter(r => String(r.status) === 'running');
+  $('view-active-runs').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-bold">Active Runs</h1>
+          <p class="text-sm text-slate-400 mt-1">Live runs in progress. Click any run to open full forensic detail.</p>
+        </div>
+        <button class="btn btn-primary" onclick="openNewRunModal()">New Run</button>
+      </div>
+      ${active.length ? `
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        ${active.map(r => {
+          const run = state.runsEnriched.find(x => x.run_id === r.run_id) || {};
+          const stage = r.current_node || run.current_stage || 'ingest_task';
+          return `<div class="card hover:border-teal-600/60">
+            <button class="text-left w-full" onclick="openRunDetail('${esc(r.run_id)}')">
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <div class="mono text-xs text-teal-300">${esc(r.run_id)}</div>
+                ${statusChip('running')}
+              </div>
+              <div class="text-sm text-slate-200 line-clamp-2">${esc(r.task || run.task || '')}</div>
+              <div class="text-xs text-slate-500 mt-2">Started ${ago(r.started_at || run.created_at)}</div>
+              <div class="mt-2 flex items-center gap-1 flex-wrap">
+                ${PIPELINE.map(s => `<span class="chip ${s === stage ? 'chip-info' : 'chip-neutral'} mono">${esc(s.replaceAll('_',' '))}</span>`).join('')}
+              </div>
+            </button>
+            <button class="btn mt-3 w-full text-xs font-semibold bg-red-900/40 border-red-700/60 text-red-300 hover:bg-red-800/60" onclick="cancelRun('${esc(r.run_id)}')">Cancel Run</button>
+          </div>`;
+        }).join('')}
+      </div>` : '<div class="card text-sm text-slate-500">No active runs right now.</div>'}
+    </div>`;
+}
+
+function renderRuns() {
+  const runs = applyRunFilters();
+  const selected = runs.find(r => r.run_id === state.selectedRunId) || runs[0] || null;
+  if (selected) state.selectedRunId = selected.run_id;
+
+  $('view-runs').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-bold">Runs</h1>
+          <p class="text-sm text-slate-400 mt-1">Triage console with master-detail flow</p>
+        </div>
+        <button class="btn btn-primary" onclick="openNewRunModal()">New Run</button>
+      </div>
+
+      <div class="card">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-2">
+          <input id="runs-search" value="${esc(state.runFilters.search)}" oninput="updateRunFilter('search', this.value)" class="xl:col-span-2 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="Search text or IDs" />
+          <select onchange="updateRunFilter('status', this.value)" class="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm">${optionList(['all','running','ok','error','completed','cancelled'], state.runFilters.status)}</select>
+          <select onchange="updateRunFilter('agent', this.value)" class="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm">
+            ${optionList(['all', ...state.agents.map(a => a.agent_id)], state.runFilters.agent)}
+          </select>
+          <select onchange="updateRunFilter('tool', this.value)" class="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm">
+            ${optionList(['all', ...state.tools.map(t => t.name)], state.runFilters.tool)}
+          </select>
+          <select onchange="updateRunFilter('stage', this.value)" class="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm">
+            ${optionList(['all', ...PIPELINE], state.runFilters.stage)}
+          </select>
+          <select onchange="updateRunFilter('sort', this.value)" class="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm">
+            ${optionList(['created_desc','created_asc','duration_desc','status'], state.runFilters.sort)}
+          </select>
+        </div>
+        <div class="flex items-center gap-2 mt-2">
+          <button class="btn btn-ghost" onclick="applyRunPreset('failed_1h')">Failed (1h)</button>
+          <button class="btn btn-ghost" onclick="applyRunPreset('running_now')">Running now</button>
+          <button class="btn btn-ghost" onclick="applyRunPreset('my_agent')">My agent</button>
+          <button class="btn btn-soft" onclick="resetRunFilters()">Reset</button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <div class="xl:col-span-7 card p-0 overflow-hidden">
+          <div class="overflow-auto max-h-[70vh]">
+            <table class="w-full sticky-head">
+              <thead>
+                <tr>
+                  <th class="table-head">Run</th>
+                  <th class="table-head">Task</th>
+                  <th class="table-head">Agent</th>
+                  <th class="table-head">Status</th>
+                  <th class="table-head">Stage</th>
+                  <th class="table-head">Duration</th>
+                  <th class="table-head">Created</th>
+                  <th class="table-head"></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${runs.length ? runs.map(r => {
+                  const selectedCls = state.selectedRunId === r.run_id ? 'bg-teal-900/25' : '';
+                  const stage = r.failed_stage || r.current_stage || '–';
+                  const taskLine1 = (r.task || '').split('\n')[0] || '–';
+                  const taskLine2 = (r.task || '').split('\n').slice(1).join(' ').slice(0, 90);
+                  const failHint = r.status === 'error' ? (r.failure_reason || '').split('\n').find(l => l.includes('ROOT CAUSE') || l.includes('Tool ') || l.includes('•')) || (r.failure_reason || '').slice(0, 120) : '';
+                  return `<tr class="table-row ${selectedCls} cursor-pointer" onclick="selectRun('${esc(r.run_id)}')">
+                    <td class="table-cell mono text-xs">
+                      <div class="flex items-center gap-2"><span>${esc(shortId(r.run_id))}</span><button class="text-slate-500 hover:text-slate-300" onclick="event.stopPropagation();copyText('${esc(r.run_id)}')">⧉</button></div>
+                    </td>
+                    <td class="table-cell max-w-[22rem]">
+                      <div class="truncate">${esc(taskLine1)}</div>
+                      <div class="text-xs text-slate-500 truncate">${esc(taskLine2)}</div>
+                      ${failHint ? `<div class="text-xs text-red-400/80 truncate mt-0.5">⚠ ${esc(failHint.trim())}</div>` : ''}
+                    </td>
+                    <td class="table-cell mono text-xs">${esc(shortId(r.agent_id))}</td>
+                    <td class="table-cell">${statusChip(r.status)}</td>
+                    <td class="table-cell mono text-xs">${esc(stage)}</td>
+                    <td class="table-cell">${fmtDur(r.latency_ms)}</td>
+                    <td class="table-cell text-xs">${ago(r.created_at)}</td>
+                    <td class="table-cell">
+                      <div class="flex items-center gap-1">
+                        <button class="btn btn-soft" onclick="event.stopPropagation();rerun('${esc(r.run_id)}')">Re-run</button>
+                        <button class="btn btn-soft" onclick="event.stopPropagation();window.open(location.origin + '/#run/' + '${esc(r.run_id)}', '_blank')">Open</button>
+                      </div>
+                    </td>
+                  </tr>`;
+                }).join('') : '<tr><td colspan="8" class="table-cell text-slate-500 text-center py-6">No runs match filters.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="xl:col-span-5 card" id="run-summary-panel">
+          ${selected ? renderRunSummaryPanel(selected) : '<div class="text-sm text-slate-500">Select a run to see details.</div>'}
+        </div>
+      </div>
+    </div>`;
+
+  if (selected) ensureRunAnalysis(selected.run_id);
+}
+
+function optionList(values, selected) {
+  return values.map(v => `<option value="${esc(v)}" ${String(v) === String(selected) ? 'selected' : ''}>${esc(v)}</option>`).join('');
+}
+
+function resetRunFilters() {
+  state.runFilters = { search: '', status: 'all', agent: 'all', stage: 'all', tool: 'all', sort: 'created_desc', preset: 'none' };
+  renderRuns();
+}
+
+function updateRunFilter(key, value) {
+  state.runFilters[key] = value;
+  renderRuns();
+}
+
+function applyRunFilters() {
+  const f = state.runFilters;
+  let rows = filterByRange(state.runsEnriched, 'created_at').slice();
+  const q = (f.search || '').toLowerCase().trim();
+  if (q) {
+    rows = rows.filter(r =>
+      String(r.run_id || '').toLowerCase().includes(q) ||
+      String(r.agent_id || '').toLowerCase().includes(q) ||
+      String(r.task || '').toLowerCase().includes(q) ||
+      String(r.failure_reason || '').toLowerCase().includes(q)
+    );
+  }
+  if (f.status !== 'all') rows = rows.filter(r => String(r.status) === f.status);
+  if (f.agent !== 'all') rows = rows.filter(r => String(r.agent_id) === f.agent);
+  if (f.stage !== 'all') rows = rows.filter(r => String(r.current_stage) === f.stage || String(r.failed_stage) === f.stage);
+  if (f.tool !== 'all') {
+    rows = rows.filter(r => {
+      const ana = state.runAnalysisCache[r.run_id];
+      if (!ana) return false;
+      return (ana.tool_calls || []).some(tc => String(tc.tool) === f.tool);
+    });
+  }
+  if (f.sort === 'created_asc') rows.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  if (f.sort === 'created_desc') rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  if (f.sort === 'duration_desc') rows.sort((a, b) => (b.latency_ms || 0) - (a.latency_ms || 0));
+  if (f.sort === 'status') rows.sort((a, b) => String(a.status).localeCompare(String(b.status)));
+  return rows;
+}
+
+function selectRun(runId) {
+  state.selectedRunId = runId;
+  renderRuns();
+}
+
+function renderRunSummaryPanel(run) {
+  const ana = state.runAnalysisCache[run.run_id];
+  const failure = run.failure_reason || ana?.failure_reason || run.error_message || '–';
+  const stageList = (ana?.stages || []).slice(0, 6).map(s => `<div class="flex items-center justify-between text-xs py-1 border-b border-slate-700/50 last:border-0"><span class="mono text-slate-300">${esc(s.name)}</span><span class="text-slate-400">${fmtDur(s.duration_ms)} · ${s.events} events · ${s.errors} errs</span></div>`).join('') || '<div class="text-xs text-slate-500">Stage metrics load on selection.</div>';
+  return `
+    <div class="space-y-3">
+      <div class="flex items-center justify-between gap-2">
+        <div>
+          <div class="text-sm text-slate-400">Selected run</div>
+          <div class="mono text-sm">${esc(run.run_id)}</div>
+        </div>
+        <div>${statusChip(run.status)}</div>
+      </div>
+      <div class="text-sm text-slate-300">${esc((run.task || '').slice(0, 240))}</div>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Agent</div><div class="mono">${esc(run.agent_id || '–')}</div></div>
+        <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Stage</div><div class="mono">${esc(run.failed_stage || run.current_stage || '–')}</div></div>
+        <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Duration</div><div>${fmtDur(run.latency_ms)}</div></div>
+        <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Created</div><div>${ago(run.created_at)}</div></div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">⚠ Root Cause</div>
+        <pre class="text-xs text-red-300 bg-red-900/10 border border-red-700/40 rounded p-2 whitespace-pre-wrap leading-relaxed max-h-40 overflow-auto">${esc(failure)}</pre>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">Stage summary</div>
+        <div>${stageList}</div>
+      </div>
+      <div class="flex items-center gap-2 pt-1">
+        <button class="btn btn-primary" onclick="openRunDetail('${esc(run.run_id)}')">Open full detail</button>
+        <button class="btn btn-soft" onclick="rerun('${esc(run.run_id)}')">Re-run</button>
+      </div>
+    </div>`;
+}
+
+async function ensureRunAnalysis(runId) {
+  if (state.runAnalysisCache[runId]) return;
+  const data = await api(`/api/runs/${encodeURIComponent(runId)}/analysis`);
+  if (data) {
+    state.runAnalysisCache[runId] = data;
+    if (state.view === 'runs' && state.selectedRunId === runId) renderRuns();
+    if (state.view === 'run-detail' && state.selectedRunDetailId === runId) renderRunDetail();
+  }
+}
+
+async function prefetchRunAnalysis() {
+  const sample = state.runsEnriched.slice(0, 60);
+  await Promise.all(sample.map(r => ensureRunAnalysis(r.run_id)));
+}
+
+async function cancelRun(runId) {
+  const res = await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+  if (res && res.cancel_requested) {
+    toast('Cancellation requested', 'ok');
+    // Update local state immediately
+    const ar = state.activeRuns.find(r => r.run_id === runId);
+    if (ar) ar.status = 'cancelled';
+    renderCurrentView();
+  } else {
+    toast('Failed to cancel run', 'error');
+  }
+}
+
+async function rerun(runId) {
+  const run = state.runs.find(r => r.run_id === runId) || state.runsEnriched.find(r => r.run_id === runId);
+  if (!run) return toast('Run not found', 'error');
+  await triggerRun({ task: run.task || 'Re-run', context: { rerun_of: runId } });
+}
+
+function openRunDetail(runId) {
+  stopRunLogStream(state.selectedRunDetailId);
+  state.selectedRunDetailId = runId;
+  if (!state.runLiveEvents[runId]) state.runLiveEvents[runId] = [];
+  state.runDetailTab = 'overview';
+  setView('run-detail');
+  startRunLogStream(runId);
+  ensureRunAnalysis(runId);
+}
+
+function tabButton(tab, active, label) {
+  const cls = active ? 'btn btn-primary' : 'btn btn-soft';
+  return `<button class="${cls}" onclick="setRunDetailTab('${tab}')">${esc(label)}</button>`;
+}
+
+function setRunDetailTab(tab) {
+  state.runDetailTab = tab;
+  renderRunDetail();
+}
+
+function stopRunLogStream(runId) {
+  if (!runId) return;
+  const src = state.runLogStreams[runId];
+  if (src) {
+    try { src.close(); } catch {}
+    delete state.runLogStreams[runId];
+  }
+}
+
+function startRunLogStream(runId) {
+  if (!runId || typeof EventSource === 'undefined') return;
+  if (state.runLogStreams[runId]) return;
+  const src = new EventSource(`/api/runlog/${encodeURIComponent(runId)}/stream`);
+  state.runLogStreams[runId] = src;
+  src.onmessage = (evt) => {
+    let parsed = null;
+    try { parsed = JSON.parse(evt.data); } catch { parsed = null; }
+    if (!parsed || parsed.event === 'stream_end') return;
+    if (!state.runLiveEvents[runId]) state.runLiveEvents[runId] = [];
+    state.runLiveEvents[runId].push(parsed);
+    if (state.runLiveEvents[runId].length > 2000) state.runLiveEvents[runId] = state.runLiveEvents[runId].slice(-2000);
+    const cache = state.runAnalysisCache[runId];
+    if (cache && Array.isArray(cache.events)) {
+      cache.events.push(parsed);
+      if (cache.events.length > 5000) cache.events = cache.events.slice(-5000);
+    }
+    if (state.view === 'run-detail' && state.selectedRunDetailId === runId) renderRunDetail();
+  };
+  src.onerror = () => {
+    stopRunLogStream(runId);
+  };
+}
+
+function parseRunEventSlices(allEvents) {
+  const events = Array.isArray(allEvents) ? allEvents : [];
+  const steps = events.filter(e => ['task_pool_update', 'subtask_attempt_started', 'subtask_attempt_succeeded', 'subtask_attempt_failed'].includes(String(e.event)));
+  const agentEvents = events.filter(e => String(e.event).startsWith('agent_') || ['agent_run_complete', 'agent_created', 'agent_created_for_role', 'agent_reused_for_role', 'agent_reused_by_capability'].includes(String(e.event)));
+  const toolEvents = events.filter(e => String(e.event) === 'tool_call');
+  const thoughtEvents = events.filter(e => {
+    const p = e.payload || {};
+    const text = JSON.stringify(p).toLowerCase();
+    return text.includes('thought') || text.includes('reasoning') || text.includes('action') || text.includes('plan') || text.includes('step');
+  });
+  const ioEvents = events.filter(e => {
+    const p = e.payload || {};
+    return p.input != null || p.output != null || p.args != null || p.result != null || p.response != null;
+  });
+  return { events, steps, agentEvents, toolEvents, thoughtEvents, ioEvents };
+}
+
+function renderForensicEventCards(events, title, subtitle, limit = 200) {
+  if (!events.length) return `<div class="card text-xs text-slate-500">No ${esc(title.toLowerCase())} found.</div>`;
+  const uid = 'evlog-' + Math.random().toString(36).slice(2, 8);
+  return `<div class="card p-0">
+    <div class="px-3 py-2 border-b border-slate-700/60 flex items-center justify-between">
+      <div>
+        <div class="text-sm font-semibold">${esc(title)}</div>
+        <div class="text-xs text-slate-500">${esc(subtitle)} · ${events.length} events</div>
+      </div>
+      <label class="flex items-center gap-1 text-xs text-slate-400 cursor-pointer select-none">
+        <input type="checkbox" checked onchange="toggleAutoScroll('${uid}', this.checked)" class="accent-teal-500" /> Auto-scroll
+      </label>
+    </div>
+    <div id="${uid}" class="overflow-auto max-h-[36rem] divide-y divide-slate-700/30" data-autoscroll="true">
+      ${events.slice(-limit).map(e => {
+        const p = e.payload || {};
+        const evName = e.event || 'event';
+        const st = p.status || (p.ok === true ? 'ok' : p.ok === false ? 'error' : '');
+        const agentId = p.agent_id || e.agent_id || '';
+        const summary = p.reason || p.error || p.result ? String(p.reason || p.error || (typeof p.result === 'string' ? p.result : '')).slice(0, 120) : '';
+        return `<div class="px-3 py-2 hover:bg-slate-800/40 text-xs group">
+          <div class="flex items-center gap-2">
+            <span class="mono text-teal-300 shrink-0">${esc(evName)}</span>
+            ${st ? statusChip(st) : ''}
+            ${agentId ? `<span class="mono text-slate-500 truncate max-w-[10rem]">${esc(agentId)}</span>` : ''}
+            <span class="ml-auto text-slate-500 shrink-0">${esc(fmtTime(e.ts || e.created_at))}</span>
+          </div>
+          ${summary ? `<div class="mt-1 text-slate-400 truncate">${esc(summary)}</div>` : ''}
+          <pre class="mt-1 text-slate-500 whitespace-pre-wrap break-all max-h-0 overflow-hidden group-hover:max-h-52 transition-all duration-200">${esc(JSON.stringify(p, null, 2))}</pre>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+function toggleAutoScroll(uid, on) {
+  const el = document.getElementById(uid);
+  if (el) {
+    el.dataset.autoscroll = on ? 'true' : 'false';
+    if (on) el.scrollTop = el.scrollHeight;
+  }
+}
+// After render, auto-scroll all log panels that have the flag
+function autoScrollLogPanels() {
+  document.querySelectorAll('[data-autoscroll="true"]').forEach(el => {
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+function renderRunDetail() {
+  const runId = state.selectedRunDetailId;
+  const run = state.runsEnriched.find(r => r.run_id === runId) || state.runs.find(r => r.run_id === runId);
+  const analysis = state.runAnalysisCache[runId];
+  const tab = state.runDetailTab || 'overview';
+  const liveEvents = state.runLiveEvents[runId] || [];
+  const mergedEvents = [...(analysis?.events || []), ...liveEvents];
+  const uniqueEvents = [];
+  const seen = new Set();
+  for (const ev of mergedEvents) {
+    const sig = `${ev.ts || ''}|${ev.event || ''}|${JSON.stringify(ev.payload || {}).slice(0,200)}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    uniqueEvents.push(ev);
+  }
+  const slices = parseRunEventSlices(uniqueEvents);
+
+  const summary = {
+    status: analysis?.status || run?.status || 'unknown',
+    failure: analysis?.failure_reason || run?.failure_reason || run?.error_message || '',
+    started: analysis?.started_at || run?.created_at,
+    ended: analysis?.finished_at || '',
+    duration: run?.latency_ms,
+    agent: run?.agent_id || '–',
+    model: 'from config',
+    policy: 'default',
+  };
+
+  const stageTimeline = (analysis?.stages || []).map(s => {
+    const bad = s.errors > 0;
+    return `<div class="flex items-start gap-3 py-2 border-b border-slate-700/50 last:border-0">
+      <span class="timeline-dot ${bad ? 'bg-red-400' : 'bg-teal-400'} mt-1"></span>
+      <div class="flex-1 min-w-0">
+        <div class="mono text-xs text-teal-300">${esc(s.name)}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${fmtDur(s.duration_ms)} · ${s.events} events · ${s.errors} errors</div>
+        <div class="text-xs text-slate-500 mt-0.5">tool calls: ${s.tool_calls || 0} · model calls: ${s.model_calls || 0}</div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="text-sm text-slate-500">No stage data yet.</div>';
+
+  // Extract tool calls from analysis or fallback to raw events
+  const toolCallsData = (analysis?.tool_calls || []).length > 0
+    ? analysis.tool_calls
+    : uniqueEvents.filter(e => e.event === 'tool_call').map(e => {
+        const p = e.payload || {};
+        return { ts: e.ts, tool: p.tool || '', ok: !!p.ok, reason: p.reason || '', error: p.error || '', args: p.args || {}, result: p.result || {} };
+      });
+  // Extract model calls from analysis or fallback to raw events
+  const modelCallsData = (analysis?.model_calls || []).length > 0
+    ? analysis.model_calls
+    : uniqueEvents.filter(e => ['approval_request','approval_decision','api_gate_decision','api_call_intent'].includes(e.event)).map(e => {
+        const p = e.payload || {};
+        return { ts: e.ts, type: p.call_type || e.event, provider: p.provider || '', endpoint: p.endpoint || '', approved: p.approved, reason: p.reason || '' };
+      });
+  // Extract artifacts from analysis or fallback to raw events
+  const artifactsData = (analysis?.artifacts || []).length > 0
+    ? analysis.artifacts
+    : uniqueEvents.filter(e => ['agent_run_complete','synthesis_complete','run_summary'].includes(e.event) || (e.event === 'tool_call' && (e.payload||{}).tool === 'file_io')).map(e => {
+        const p = e.payload || {};
+        if (e.event === 'tool_call') return { ts: e.ts, kind: 'file_io', summary: p.reason || 'file operation' };
+        return { ts: e.ts, kind: e.event, summary: p.result ? String(p.result).slice(0, 200) : (p.status || e.event) };
+      });
+
+  const toolRows = toolCallsData.map(c => `<tr class="table-row"><td class="table-cell mono text-xs">${esc(c.ts || '')}</td><td class="table-cell mono">${esc(c.tool || '')}</td><td class="table-cell">${statusChip(c.ok ? 'ok' : 'error')}</td><td class="table-cell text-xs">${esc(c.reason || c.error || '')}</td><td class="table-cell text-xs"><details><summary class="cursor-pointer text-teal-400">args/result</summary><pre class="mt-1 text-xs whitespace-pre-wrap">${esc(JSON.stringify({args: c.args, result: c.result}, null, 2))}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="table-cell text-slate-500">No tool calls.</td></tr>';
+  const modelRows = modelCallsData.map(c => `<tr class="table-row"><td class="table-cell mono text-xs">${esc(c.ts || '')}</td><td class="table-cell">${esc(c.type || '')}</td><td class="table-cell">${esc(c.provider || '–')}</td><td class="table-cell">${c.approved === true ? statusChip('ok') : c.approved === false ? statusChip('error') : '–'}</td><td class="table-cell text-xs">${esc(c.reason || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="table-cell text-slate-500">No model calls recorded.</td></tr>';
+  const artifactRows = artifactsData.map(c => `<tr class="table-row"><td class="table-cell mono text-xs">${esc(c.ts || '')}</td><td class="table-cell">${esc(c.kind || '')}</td><td class="table-cell text-xs">${esc(c.summary || '')}</td></tr>`).join('') || '<tr><td colspan="3" class="table-cell text-slate-500">No artifacts recorded.</td></tr>';
+
+  const tabBody = tab === 'overview'
+    ? `<div class="space-y-4"><div class="grid grid-cols-1 xl:grid-cols-2 gap-4"><div class="card">${stageTimeline}</div><div class="card"><div class="text-xs text-slate-500 mb-2">Final output</div><pre class="text-xs bg-slate-900 rounded-lg border border-slate-700/50 p-3 max-h-[26rem] overflow-auto">${esc(analysis?.result || analysis?.error || summary.failure || '')}</pre></div></div><div class="grid grid-cols-1 xl:grid-cols-2 gap-4"><div>${renderForensicEventCards(slices.agentEvents, 'Agents Invoked / Created', 'All agent-related events')}</div><div>${renderForensicEventCards(slices.steps, 'Agent Steps & Substeps', 'Task decomposition and attempt lifecycle')}</div></div></div>`
+    : tab === 'tools'
+      ? `<div class="card p-0 overflow-auto max-h-[34rem]"><table class="w-full"><thead><tr><th class="table-head">Time</th><th class="table-head">Tool</th><th class="table-head">Status</th><th class="table-head">Summary</th><th class="table-head">Details</th></tr></thead><tbody>${toolRows}</tbody></table></div>`
+      : tab === 'models'
+        ? `<div class="card p-0 overflow-auto max-h-[34rem]"><table class="w-full"><thead><tr><th class="table-head">Time</th><th class="table-head">Event</th><th class="table-head">Provider</th><th class="table-head">Status</th><th class="table-head">Reason</th></tr></thead><tbody>${modelRows}</tbody></table></div>`
+      : tab === 'thoughts'
+        ? `<div class="space-y-4">${renderForensicEventCards(slices.thoughtEvents, 'Thoughts / Actions / Planning', 'Extracted from payload semantics')}${renderForensicEventCards(slices.ioEvents, 'Inputs / Outputs', 'Payloads containing args, result, input, output')}</div>`
+      : tab === 'steps'
+        ? `<div class="space-y-4">${renderForensicEventCards(slices.steps, 'Steps / Substeps', 'Decompose, attempt, success/fail transitions')}${renderForensicEventCards(slices.agentEvents, 'Agent Lifecycle', 'Created, reused, invoked, completed')}</div>`
+        : tab === 'artifacts'
+          ? `<div class="card p-0 overflow-auto max-h-[34rem]"><table class="w-full"><thead><tr><th class="table-head">Time</th><th class="table-head">Kind</th><th class="table-head">Summary</th></tr></thead><tbody>${artifactRows}</tbody></table></div>`
+          : `<div class="space-y-3"><div class="card"><div class="flex items-center justify-between mb-2"><div class="text-sm font-semibold">Full Event Stream</div><div class="flex items-center gap-3"><div class="text-xs text-slate-500">${uniqueEvents.length} events</div><button class="btn btn-soft text-xs px-2 py-1" onclick="copyAllLogs('${esc(runId)}')">Copy All Logs</button></div></div><pre id="raw-event-log-${esc(runId)}" class="text-xs bg-slate-900 rounded-lg border border-slate-700/50 p-3 max-h-[34rem] overflow-auto">${esc(JSON.stringify(uniqueEvents, null, 2))}</pre></div>${renderForensicEventCards(uniqueEvents, 'Raw Event Explorer', 'Expand every event with payload and key fields', 500)}</div>`;
+
+  $('view-run-detail').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <button class="btn btn-ghost mb-2" onclick="setView('runs')">← Back to Runs</button>
+          <h1 class="text-2xl font-bold">Run Detail</h1>
+          <div class="mono text-xs text-slate-500 mt-1">${esc(runId || '')}</div>
+          <div class="text-xs ${state.runLogStreams[runId] ? 'text-teal-300' : 'text-slate-500'} mt-1">${state.runLogStreams[runId] ? 'Live stream connected' : 'Snapshot mode'}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          ${summary.status === 'running' ? `<button class="btn text-xs font-semibold bg-red-900/40 border-red-700/60 text-red-300 hover:bg-red-800/60" onclick="cancelRun('${esc(runId || '')}')">Cancel Run</button>` : ''}
+          <button class="btn btn-soft" onclick="rerun('${esc(runId || '')}')">Re-run</button>
+          <button class="btn btn-soft" onclick="openNewRunModal('${esc((run?.task || '').replace(/'/g, "&#39;"))}')">Re-run with edits</button>
+          <button class="btn btn-soft" onclick="downloadRunBundle('${esc(runId || '')}')">Download bundle</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-2 text-xs">
+          <div><div class="text-slate-500">Status</div><div class="mt-1">${statusChip(summary.status)}</div></div>
+          <div><div class="text-slate-500">Started</div><div class="mt-1">${fmtTime(summary.started)}</div></div>
+          <div><div class="text-slate-500">Ended</div><div class="mt-1">${fmtTime(summary.ended)}</div></div>
+          <div><div class="text-slate-500">Duration</div><div class="mt-1">${fmtDur(summary.duration)}</div></div>
+          <div><div class="text-slate-500">Agent</div><div class="mt-1 mono">${esc(summary.agent)}</div></div>
+          <div><div class="text-slate-500">Model / policy</div><div class="mt-1">${esc(summary.model)} / ${esc(summary.policy)}</div></div>
+        </div>
+        ${summary.failure
+          ? `<div class="mt-3 rounded border border-red-700/40 bg-red-900/10 p-3">
+              <div class="flex items-center gap-2 mb-2"><span class="text-red-400 text-sm font-bold">⚠ Root Cause Analysis</span></div>
+              <pre class="text-xs text-red-300 whitespace-pre-wrap leading-relaxed">${esc(summary.failure)}</pre>
+            </div>`
+          : `<div class="mt-3 p-2 rounded border border-slate-700/50 bg-slate-900 text-slate-400 text-xs">No failure reason available.</div>`
+        }
+      </div>
+
+      <div class="flex items-center gap-2">
+        ${tabButton('overview', tab === 'overview', 'Overview')}
+        ${tabButton('thoughts', tab === 'thoughts', 'Thoughts/Actions')}
+        ${tabButton('steps', tab === 'steps', 'Steps/Substeps')}
+        ${tabButton('tools', tab === 'tools', 'Tool calls')}
+        ${tabButton('models', tab === 'models', 'Model calls')}
+        ${tabButton('artifacts', tab === 'artifacts', 'Artifacts')}
+        ${tabButton('raw', tab === 'raw', 'Everything (Raw)')}
+      </div>
+
+      ${tabBody}
+    </div>`;
+}
+
+async function copyAllLogs(runId) {
+  const analysis = state.runAnalysisCache[runId];
+  const events = analysis?.events || [];
+  const text = JSON.stringify(events, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('All logs copied to clipboard', 'ok');
+  } catch (e) {
+    // Fallback for insecure contexts
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('All logs copied to clipboard', 'ok');
+  }
+}
+
+async function downloadRunBundle(runId) {
+  const analysis = state.runAnalysisCache[runId] || await api(`/api/runs/${encodeURIComponent(runId)}/analysis`);
+  if (!analysis) return toast('Run bundle unavailable', 'error');
+  const blob = new Blob([JSON.stringify(analysis, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${runId}_bundle.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderApprovalsContent(targetId) {
+  const list = state.approvals;
+  const container = $(targetId);
+  if (!list.length) {
+    container.innerHTML = '<div class="text-sm text-slate-500 text-center py-6">No pending approvals.</div>';
+    return;
+  }
+  container.innerHTML = list.map(a => {
+    const rd = a.request_data || {};
+    const isCreate = rd.type === 'agent_create';
+    const action = isCreate ? 'Agent creation request' : `${rd.provider || 'API'} ${rd.endpoint || ''}`;
+    const risk = rd.reason || (isCreate ? 'Low confidence match requires confirmation.' : 'Paid provider / policy gate');
+    const diff = isCreate
+      ? `+ create agent\n+ role: ${(rd.requested_profile || {}).name || 'n/a'}`
+      : `+ provider: ${rd.provider || 'n/a'}\n+ endpoint: ${rd.endpoint || 'n/a'}\n+ est_cost_usd: ${rd.estimated_cost_usd || 0}`;
+    return `<div class="card border-yellow-700/40 bg-yellow-900/10 mb-3">
+      <div class="flex items-center justify-between gap-2 mb-2">
+        <div class="font-medium text-yellow-300">${esc(action)}</div>
+        <div class="text-xs text-slate-500">${ago(a.created_at)}</div>
+      </div>
+      <div class="text-xs text-slate-400 mb-2">Risk context: ${esc(risk)}</div>
+      <pre class="text-xs mono bg-slate-900 border border-slate-700/50 rounded-lg p-2 mb-3">${esc(diff)}</pre>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button class="btn btn-primary" onclick="decideApproval('${esc(a.approval_id)}', true)">Approve once</button>
+        <button class="btn btn-danger" onclick="decideApproval('${esc(a.approval_id)}', false)">Deny</button>
+        <button class="btn btn-soft" onclick="toast('Policy exception is not configured in current backend.', 'info')">Approve policy exception</button>
+        ${a.run_id ? `<button class="btn btn-ghost" onclick="openRunDetail('${esc(a.run_id)}')">View in run context</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderApprovalsPage() {
+  $('view-approvals').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Approvals</h1>
+        <p class="text-sm text-slate-400 mt-1">Operational interrupts requiring immediate decisions.</p>
+      </div>
+      <div id="page-approvals-content"></div>
+    </div>`;
+  renderApprovalsContent('page-approvals-content');
+}
+
+function toggleApprovalsDrawer(open) {
+  $('approvals-drawer-bg').classList.toggle('hidden', !open);
+  $('approvals-drawer').classList.toggle('open', !!open);
+  if (open) renderApprovalsContent('drawer-approvals-content');
+}
+
+async function decideApproval(id, approved) {
+  const res = await api(`/api/approvals/${encodeURIComponent(id)}/decide`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved, note: approved ? 'approved_via_dashboard' : 'denied_via_dashboard' })
+  });
+  if (!res) return toast('Decision failed', 'error');
+  toast(approved ? 'Approval granted' : 'Approval denied', 'ok');
+  await refreshAll();
+  renderApprovalsContent('drawer-approvals-content');
+  if (state.view === 'approvals') renderApprovalsPage();
+}
+
+function computeAgentHealth() {
+  const byAgent = {};
+  for (const r of state.runsEnriched) {
+    const aid = r.agent_id || 'unknown';
+    if (!byAgent[aid]) byAgent[aid] = { recent: 0, failed: 0, lastError: '' };
+    byAgent[aid].recent += 1;
+    if (['error', 'failed'].includes(String(r.status))) {
+      byAgent[aid].failed += 1;
+      if (!byAgent[aid].lastError) byAgent[aid].lastError = r.failure_reason || r.error_message || 'Run failed';
+    }
+  }
+  return byAgent;
+}
+
+function renderAgents() {
+  const health = computeAgentHealth();
+  $('view-agents').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-bold">Agents</h1>
+          <p class="text-sm text-slate-400 mt-1">Operational status with degradation visibility.</p>
+        </div>
+      </div>
+
+      <div class="card p-0 overflow-auto max-h-[72vh]">
+        <table class="w-full sticky-head">
+          <thead>
+            <tr>
+              <th class="table-head">Agent</th>
+              <th class="table-head">Status</th>
+              <th class="table-head">Skills</th>
+              <th class="table-head">Uses</th>
+              <th class="table-head">Success</th>
+              <th class="table-head">Last Error</th>
+              <th class="table-head">Last Used</th>
+              <th class="table-head"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${state.agents.map(a => {
+              const h = health[a.agent_id] || { recent: 0, failed: 0, lastError: '' };
+              const failRate = h.recent ? h.failed / h.recent : 0;
+              const degraded = h.recent >= 3 && failRate >= 0.4;
+              const status = degraded ? 'degraded' : (a.status || 'active');
+              const skillIds = typeof a.skill_ids === 'string' ? JSON.parse(a.skill_ids || '[]') : (a.skill_ids || []);
+              return `<tr class="table-row">
+                <td class="table-cell">
+                  <div class="font-medium">${esc(a.name || a.agent_id)}</div>
+                  <div class="mono text-xs text-slate-500">${esc(a.agent_id)}</div>
+                </td>
+                <td class="table-cell">${statusChip(status)}</td>
+                <td class="table-cell"><div class="flex gap-1 flex-wrap">${skillIds.length ? skillIds.map(s => `<span class="chip chip-info mono text-xs cursor-pointer" onclick="event.stopPropagation();openSkillDetail('${esc(s)}')">${esc(s)}</span>`).join('') : '<span class="text-xs text-slate-500">–</span>'}</div></td>
+                <td class="table-cell">${esc(a.usage_count ?? 0)}</td>
+                <td class="table-cell">${Math.round((a.success_rate || 0) * 100)}%</td>
+                <td class="table-cell text-xs text-slate-400 max-w-[22rem]"><div class="truncate">${esc(h.lastError || '–')}</div></td>
+                <td class="table-cell text-xs">${ago(a.last_used_at)}</td>
+                <td class="table-cell"><button class="btn btn-soft" onclick="openAgentDetail('${esc(a.agent_id)}')">Open</button></td>
+              </tr>`;
+            }).join('') || '<tr><td class="table-cell text-slate-500" colspan="8">No agents.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function openAgentDetail(agentId) {
+  state.selectedAgentId = agentId;
+  const d = await api(`/api/agents/${encodeURIComponent(agentId)}`);
+  state.agentDetail = d;
+  setView('agent-detail');
+}
+
+function renderAgentDetail() {
+  const a = state.agentDetail;
+  if (!a) {
+    $('view-agent-detail').innerHTML = '<div class="text-sm text-slate-500">Agent not found.</div>';
+    return;
+  }
+  const recentRuns = state.runsEnriched.filter(r => r.agent_id === a.agent_id).slice(0, 8);
+  const lastFailures = recentRuns.filter(r => ['error', 'failed'].includes(String(r.status))).slice(0, 5);
+  $('view-agent-detail').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <button class="btn btn-ghost mb-2" onclick="setView('agents')">← Back to Agents</button>
+        <h1 class="text-2xl font-bold">${esc(a.name || a.agent_id)}</h1>
+        <div class="mono text-xs text-slate-500 mt-1">${esc(a.agent_id)}</div>
+      </div>
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
+        <div class="card">
+          <div class="font-semibold mb-2">Config / Version</div>
+          <div class="space-y-1 text-xs">
+            <div><span class="text-slate-500">Version:</span> ${esc(a.version || '–')}</div>
+            <div><span class="text-slate-500">Embedding:</span> ${esc(a.embedding_model || '–')}</div>
+            <div><span class="text-slate-500">Created:</span> ${fmtTime(a.created_at)}</div>
+            <div><span class="text-slate-500">Last used:</span> ${fmtTime(a.last_used_at)}</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="font-semibold mb-2">Allowed tools</div>
+          <div class="flex gap-1 flex-wrap">${(a.tools_allowlist || []).map(t => `<span class="chip chip-info mono">${esc(t)}</span>`).join('') || '<span class="text-xs text-slate-500">None</span>'}</div>
+          <div class="font-semibold mb-2 mt-3">Skills (base modules)</div>
+          <div class="flex gap-1 flex-wrap">${(a.skill_ids || []).length ? (a.skill_ids || []).map(s => `<span class="chip chip-info mono cursor-pointer" onclick="openSkillDetail('${esc(s)}')">${esc(s)}</span>`).join('') : '<span class="text-xs text-slate-500">None</span>'}</div>
+        </div>
+        <div class="card">
+          <div class="font-semibold mb-2">Recent failures</div>
+          <div class="space-y-1 text-xs">${lastFailures.length ? lastFailures.map(r => `<div class="border-b border-slate-700/50 pb-1"><button class="text-red-300 hover:underline" onclick="openRunDetail('${esc(r.run_id)}')">${esc(shortId(r.run_id))}</button> · ${esc(r.failure_reason || 'failed')}</div>`).join('') : '<span class="text-slate-500">No recent failures.</span>'}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="font-semibold mb-2">Recent runs</div>
+        <div class="space-y-1 text-xs">${recentRuns.length ? recentRuns.map(r => `<div class="flex items-center justify-between border-b border-slate-700/50 py-1"><span>${statusChip(r.status)} <button class="ml-1 text-teal-300 hover:underline" onclick="openRunDetail('${esc(r.run_id)}')">${esc(shortId(r.run_id))}</button></span><span class="text-slate-500">${ago(r.created_at)}</span></div>`).join('') : '<span class="text-slate-500">No runs.</span>'}</div>
+      </div>
+    </div>`;
+}
+
+function renderAudit() {
+  const q = (state.auditFilter || '').toLowerCase();
+  const events = filterByRange(state.audits, 'created_at').filter(e => !q || JSON.stringify(e).toLowerCase().includes(q));
+  $('view-audit').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Audit / Events</h1>
+        <p class="text-sm text-slate-400 mt-1">Historical event explorer.</p>
+      </div>
+      <div class="card">
+        <input oninput="state.auditFilter=this.value;renderAudit()" value="${esc(state.auditFilter)}" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm" placeholder="Search events" />
+      </div>
+      <div class="card p-0 overflow-auto max-h-[72vh]">
+        <table class="w-full sticky-head">
+          <thead>
+            <tr>
+              <th class="table-head">Type</th>
+              <th class="table-head">Run</th>
+              <th class="table-head">Agent</th>
+              <th class="table-head">Summary</th>
+              <th class="table-head">Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${events.map((e, i) => {
+              const summary = JSON.stringify(e.payload || {}).slice(0, 130);
+              return `<tr class="table-row">
+                <td class="table-cell">${statusChip(e.event_type)}</td>
+                <td class="table-cell mono text-xs">${e.run_id ? `<button class="text-teal-300 hover:underline" onclick="openRunDetail('${esc(e.run_id)}')">${esc(shortId(e.run_id))}</button>` : '–'}</td>
+                <td class="table-cell mono text-xs">${esc(shortId(e.agent_id || ''))}</td>
+                <td class="table-cell text-xs"><button class="text-slate-300 hover:text-white" onclick="toggleAuditRaw(${i})">${esc(summary)}</button><pre id="audit-raw-${i}" class="hidden mt-1 p-2 bg-slate-900 rounded border border-slate-700/50 mono overflow-auto max-h-24">${esc(JSON.stringify(e.payload || {}, null, 2))}</pre></td>
+                <td class="table-cell text-xs">${fmtTime(e.created_at)}</td>
+              </tr>`;
+            }).join('') || '<tr><td colspan="5" class="table-cell text-center text-slate-500">No events.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function toggleAuditRaw(i) {
+  const el = $(`audit-raw-${i}`);
+  if (el) el.classList.toggle('hidden');
+}
+
+function toolOpsMetrics() {
+  const usage = {};
+  const fails = {};
+  for (const runId of Object.keys(state.runAnalysisCache)) {
+    const calls = state.runAnalysisCache[runId]?.tool_calls || [];
+    for (const c of calls) {
+      const t = c.tool || 'unknown';
+      usage[t] = (usage[t] || 0) + 1;
+      if (!c.ok) fails[t] = (fails[t] || 0) + 1;
+    }
+  }
+  const usedByAgent = {};
+  for (const a of state.agents) {
+    const list = Array.isArray(a.tools_allowlist) ? a.tools_allowlist : JSON.parse(a.tools_allowlist || '[]');
+    for (const t of list) usedByAgent[t] = (usedByAgent[t] || 0) + 1;
+  }
+  return { usage, fails, usedByAgent };
+}
+
+function renderTools() {
+  const m = toolOpsMetrics();
+  $('view-tools').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Tools</h1>
+        <p class="text-sm text-slate-400 mt-1">Registry with operational signals.</p>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        ${(state.tools || []).map(t => {
+          const total = m.usage[t.name] || 0;
+          const fail = m.fails[t.name] || 0;
+          const successRate = total ? Math.round(((total - fail) / total) * 1000) / 10 : 100;
+          const lastFailAudit = state.audits.find(a => String(a.event_type).toLowerCase().includes('error') && JSON.stringify(a.payload || {}).toLowerCase().includes(String(t.name).toLowerCase()));
+          return `<div class="card">
+            <div class="flex items-center justify-between gap-2 mb-2">
+              <div class="mono text-sm text-teal-300">${esc(t.name)}</div>
+              ${statusChip(t.enabled ? 'enabled' : 'disabled')}
+            </div>
+            <div class="text-xs text-slate-400 mb-3">${esc(t.description || '')}</div>
+            <div class="space-y-1 text-xs mb-3">
+              <div><span class="text-slate-500">Last failure:</span> ${lastFailAudit ? ago(lastFailAudit.created_at) : 'none'}</div>
+              <div><span class="text-slate-500">24h success rate:</span> ${successRate}%</div>
+              <div><span class="text-slate-500">Used by agents:</span> ${m.usedByAgent[t.name] || 0}</div>
+            </div>
+            <button class="btn btn-soft" onclick="testTool('${esc(t.name)}')">Test tool (sandbox)</button>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+async function testTool(name) {
+  const res = await api(`/api/tools/${encodeURIComponent(name)}/test`, { method: 'POST' });
+  if (!res) return toast('Tool test failed', 'error');
+  toast(`${name}: ${res.message || 'ok'}`, 'ok');
+}
+
+// ── Skills views ──────────────────────────────────────────────
+
+function renderSkills() {
+  const skills = state.skills || [];
+  $('view-skills').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">Skill Library</h1>
+        <p class="text-sm text-slate-400 mt-1">Base skill modules shared across agents (Layer 1 system prompts).</p>
+      </div>
+      ${skills.length ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        ${skills.map(s => `<button class="card text-left hover:border-teal-600/60" onclick="openSkillDetail('${esc(s.skill_id)}')">
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <span class="mono text-sm text-teal-300">${esc(s.skill_id)}</span>
+            <span class="chip chip-neutral text-xs">${s.agent_count} agent${s.agent_count !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="text-sm text-slate-200">${esc(s.label)}</div>
+          <div class="text-xs text-slate-500 mt-2">${esc(s.content_length)} chars</div>
+          <div class="text-xs text-slate-600 mt-1 line-clamp-3">${esc(s.content_preview || '')}</div>
+        </button>`).join('')}
+      </div>` : '<div class="card text-sm text-slate-500">No skill modules found. Create .md files in agents/skills/.</div>'}
+    </div>`;
+}
+
+async function openSkillDetail(skillId) {
+  state.skillDetail = await api(`/api/skills/${encodeURIComponent(skillId)}`);
+  state.view = 'skill-detail';
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  $('view-skill-detail').classList.add('active');
+  renderNav();
+  renderSkillDetail();
+}
+
+function renderSkillDetail() {
+  const sk = state.skillDetail;
+  if (!sk) {
+    $('view-skill-detail').innerHTML = '<div class="card text-sm text-slate-500">Loading...</div>';
+    return;
+  }
+  const agents = sk.using_agents || [];
+  $('view-skill-detail').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <button class="btn btn-ghost mb-2" onclick="setView('skills')">← Back to Skills</button>
+        <h1 class="text-2xl font-bold">${esc(sk.label || sk.skill_id)}</h1>
+        <div class="mono text-xs text-slate-500 mt-1">${esc(sk.skill_id)}.md</div>
+      </div>
+      ${agents.length ? `<div class="card">
+        <div class="text-xs text-slate-500 mb-2">Used by ${agents.length} agent${agents.length !== 1 ? 's' : ''}</div>
+        <div class="flex flex-wrap gap-2">
+          ${agents.map(a => `<button class="chip chip-info mono text-xs" onclick="openAgentDetail('${esc(a.agent_id)}')">${esc(a.name || a.agent_id)}</button>`).join('')}
+        </div>
+      </div>` : '<div class="card text-xs text-slate-500">Not used by any agents yet.</div>'}
+      <div class="card">
+        <div class="text-xs text-slate-500 mb-2">Full content</div>
+        <pre class="text-xs bg-slate-900 rounded-lg border border-slate-700/50 p-3 max-h-[50rem] overflow-auto whitespace-pre-wrap">${esc(sk.content || '')}</pre>
+      </div>
+    </div>`;
+}
+
+// ── Settings view ─────────────────────────────────────────────
+
+function renderSettingsPage() {
+  const catalog = state.settingsCatalog || [];
+  $('view-settings').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-bold">Settings</h1>
+          <p class="text-sm text-slate-400 mt-1">All CLOSED_CLAW_* environment variables. Changes write to .env and take effect immediately.</p>
+        </div>
+        <button class="btn btn-primary" onclick="saveSettings()">Save Changes</button>
+      </div>
+      <div class="card p-0 overflow-auto max-h-[70vh]">
+        <table class="w-full">
+          <thead><tr>
+            <th class="table-head">Setting</th>
+            <th class="table-head">Env Var</th>
+            <th class="table-head">Value</th>
+            <th class="table-head">Default</th>
+          </tr></thead>
+          <tbody>
+            ${catalog.map((s, i) => `<tr class="table-row">
+              <td class="table-cell">
+                <div class="text-sm">${esc(s.label || s.env)}</div>
+                ${s.description ? `<div class="text-xs text-slate-500 mt-0.5">${esc(s.description)}</div>` : ''}
+              </td>
+              <td class="table-cell mono text-xs">${esc(s.env)}</td>
+              <td class="table-cell"><input data-env="${esc(s.env)}" class="settings-input bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm w-full max-w-xs" value="${esc(s.value ?? s.default ?? '')}" /></td>
+              <td class="table-cell text-xs text-slate-500">${esc(s.default ?? '–')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function saveSettings() {
+  const inputs = document.querySelectorAll('.settings-input');
+  const changes = {};
+  inputs.forEach(inp => {
+    const env = inp.dataset.env;
+    if (env) changes[env] = inp.value;
+  });
+  const res = await api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ changes }),
+  });
+  if (res && res.saved) {
+    toast(`Saved ${res.saved} setting${res.saved > 1 ? 's' : ''}`, 'ok');
+  } else {
+    toast('Failed to save settings', 'error');
+  }
+}
+
+function renderHealth() {
+  const s = state.systemStatus;
+  $('view-health').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold">System Health</h1>
+        <p class="text-sm text-slate-400 mt-1">Coordinator, tool backend, and provider connectivity.</p>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="card"><div class="text-xs text-slate-500">Coordinator</div><div class="mt-1">${statusChip(s.checks?.coordinator ? 'connected' : 'offline')}</div></div>
+        <div class="card"><div class="text-xs text-slate-500">LLM</div><div class="mt-1">${statusChip(s.checks?.llm ? 'connected' : 'degraded')}</div></div>
+        <div class="card"><div class="text-xs text-slate-500">Tool backend</div><div class="mt-1">${statusChip(s.checks?.tool_backend ? 'connected' : 'degraded')}</div></div>
+      </div>
+      <div class="card">
+        <div class="font-semibold mb-2">Current status</div>
+        <div>${statusChip(s.status || 'offline')}</div>
+      </div>
+    </div>`;
+}
+
+function renderCurrentView() {
+  if (state.view === 'overview') renderOverview();
+  if (state.view === 'active-runs') renderActiveRuns();
+  if (state.view === 'runs') renderRuns();
+  if (state.view === 'run-detail') renderRunDetail();
+  if (state.view === 'agents') renderAgents();
+  if (state.view === 'agent-detail') renderAgentDetail();
+  if (state.view === 'approvals') renderApprovalsPage();
+  if (state.view === 'audit') renderAudit();
+  if (state.view === 'tools') renderTools();
+  if (state.view === 'skills') renderSkills();
+  if (state.view === 'skill-detail') renderSkillDetail();
+  if (state.view === 'settings') renderSettingsPage();
+  if (state.view === 'health') renderHealth();
+  // Auto-scroll any log panels that are pinned to bottom
+  requestAnimationFrame(autoScrollLogPanels);
+}
+
+function renderSearchIndex() {
+  const input = $('global-search');
+  const results = $('search-results');
+  input.oninput = () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) { results.classList.add('hidden'); results.innerHTML = ''; return; }
+    const rows = [];
+    for (const r of state.runsEnriched) {
+      if (String(r.run_id).toLowerCase().includes(q) || String(r.task || '').toLowerCase().includes(q) || String(r.agent_id || '').toLowerCase().includes(q)) {
+        rows.push({ type: 'Run', id: r.run_id, label: `${shortId(r.run_id)} · ${String(r.task || '').slice(0, 70)}` });
+      }
+    }
+    for (const a of state.agents) {
+      if (String(a.agent_id || '').toLowerCase().includes(q) || String(a.name || '').toLowerCase().includes(q)) {
+        rows.push({ type: 'Agent', id: a.agent_id, label: `${a.name || a.agent_id}` });
+      }
+    }
+    for (const t of state.tools) {
+      if (String(t.name || '').toLowerCase().includes(q)) {
+        rows.push({ type: 'Tool', id: t.name, label: t.name });
+      }
+    }
+    for (const e of state.audits) {
+      const text = JSON.stringify(e).toLowerCase();
+      if (text.includes(q)) rows.push({ type: 'Event', id: e.id, label: `${e.event_type} · ${shortId(e.run_id || '')}` });
+    }
+    results.innerHTML = rows.slice(0, 20).map(r => `<button class="w-full text-left px-3 py-2 hover:bg-slate-700/60 border-b border-slate-700/40 last:border-0" onclick="openSearchResult('${esc(r.type)}','${esc(r.id)}')"><span class="text-xs text-slate-500">${esc(r.type)}</span><div class="text-sm">${esc(r.label)}</div></button>`).join('') || '<div class="px-3 py-2 text-sm text-slate-500">No results</div>';
+    results.classList.remove('hidden');
+  };
+  document.addEventListener('click', (e) => {
+    if (!results.contains(e.target) && e.target !== input) results.classList.add('hidden');
+  });
+}
+
+function openSearchResult(type, id) {
+  $('search-results').classList.add('hidden');
+  $('global-search').value = '';
+  if (type === 'Run') return openRunDetail(id);
+  if (type === 'Agent') return openAgentDetail(id);
+  if (type === 'Tool') { setView('tools'); return; }
+  if (type === 'Event') { setView('audit'); return; }
+}
+
+function openNewRunModal(prefill = '') {
+  $('new-run-modal-bg').classList.remove('hidden');
+  $('new-run-modal').classList.remove('hidden');
+  $('new-task').value = prefill || '';
+  $('new-run-error').textContent = '';
+  const agents = ['auto', ...state.agents.map(a => a.agent_id)];
+  $('new-agent').innerHTML = agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  $('new-tools-list').innerHTML = state.tools.map(t => `<label class="inline-flex items-center gap-2 text-xs"><input type="checkbox" value="${esc(t.name)}" checked /> ${esc(t.name)}</label>`).join('');
+}
+
+function closeNewRunModal() {
+  $('new-run-modal-bg').classList.add('hidden');
+  $('new-run-modal').classList.add('hidden');
+}
+
+async function submitNewRun() {
+  const task = ($('new-task').value || '').trim();
+  if (!task) {
+    $('new-run-error').textContent = 'Task / prompt is required.';
+    return;
+  }
+  const allowedTools = Array.from($('new-tools-list').querySelectorAll('input[type=checkbox]:checked')).map(i => i.value);
+  const context = {
+    agent: $('new-agent').value,
+    tool_preset: $('new-tool-preset').value,
+    power: {
+      model: ($('new-model').value || '').trim() || null,
+      temperature: ($('new-temperature').value || '').trim() || null,
+      max_tokens: ($('new-max-tokens').value || '').trim() || null,
+      allowed_tools: allowedTools,
+      workspace_scope: ($('new-workspace').value || '').trim() || null,
+      tags: ($('new-tags').value || '').split(',').map(t => t.trim()).filter(Boolean),
+      dry_run: $('new-dry-run').checked,
+    }
+  };
+  await triggerRun({ task, context });
+  closeNewRunModal();
+}
+
+async function triggerRun(payload) {
+  $('new-run-submit').disabled = true;
+  const res = await api('/api/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  $('new-run-submit').disabled = false;
+  if (!res?.run_id) return toast('Run launch failed', 'error');
+  toast(`Run started (${shortId(res.run_id)}) <button class='underline ml-2' onclick="openRunDetail('${res.run_id}')">Open run</button>`, 'ok');
+  await refreshAll();
+  if (state.view === 'overview') renderOverview();
+}
+
+function renderApprovalsBadge() {
+  const n = state.approvals.length;
+  const btn = $('approval-badge');
+  if (n > 0) {
+    btn.classList.remove('hidden');
+    btn.textContent = `Approval required (${n})`;
+  } else {
+    btn.classList.add('hidden');
+  }
+}
+
+async function boot() {
+  $('time-range').addEventListener('change', async (e) => {
+    state.range = e.target.value;
+    await refreshAll();
+    await prefetchRunAnalysis();
+  });
+  $('density').addEventListener('change', (e) => setDensity(e.target.value));
+
+  const hash = location.hash || '';
+  if (hash.startsWith('#run/')) {
+    state.selectedRunDetailId = hash.replace('#run/', '');
+    state.view = 'run-detail';
+  }
+
+  // Initial full load (one refreshAll covers everything including active runs)
+  await refreshAll();
+  await prefetchRunAnalysis();
+  renderCurrentView();
+  renderApprovalsBadge();
+
+  // Connect SSE for real-time push updates (active runs, approvals).
+  // If SSE connects successfully, no polling needed.
+  // If SSE fails or is unavailable, _startFallbackPoll() activates automatically.
+  connectGlobalSSE();
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
+</body>
+</html>

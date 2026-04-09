@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import logging
 import shutil
 import threading
 import time
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, Generator
 
 from fastapi import FastAPI, HTTPException, Request
+
+logger = logging.getLogger("closed_claw.web")
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from closed_claw.agents.factory import AgentFactory, AgentManifest
@@ -68,6 +71,7 @@ def _make_registry(settings: Settings) -> RegistryStore | None:
             require_sqlite_vec=False,
         )
     except Exception:
+        logger.warning("Failed to create RegistryStore", exc_info=True)
         return None
 
 
@@ -77,6 +81,7 @@ def _make_audit(settings: Settings) -> AuditStore | None:
     try:
         return AuditStore(settings.db_path)
     except Exception:
+        logger.warning("Failed to create AuditStore", exc_info=True)
         return None
 
 
@@ -342,9 +347,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             import sqlite3 as _s3
             conn = _s3.connect(":memory:")
             conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
-            result["sqlite_vec_ok"] = True
+            try:
+                import sqlite_vec
+                sqlite_vec.load(conn)
+                result["sqlite_vec_ok"] = True
+            finally:
+                conn.enable_load_extension(False)
         except Exception:
             pass
         # key presence

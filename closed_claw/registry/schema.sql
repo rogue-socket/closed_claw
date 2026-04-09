@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS agents (
   failure_count INTEGER NOT NULL DEFAULT 0,
   success_rate REAL NOT NULL DEFAULT 0,
   avg_latency_ms REAL,
-  status TEXT NOT NULL DEFAULT 'active'
+  status TEXT NOT NULL DEFAULT 'active',
+  genome_json TEXT NOT NULL DEFAULT '{}',
+  lineage_json TEXT NOT NULL DEFAULT '{}',
+  fitness_score REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS runs (

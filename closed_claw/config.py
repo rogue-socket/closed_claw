@@ -64,6 +64,9 @@ class Settings:
     max_tool_calls_per_agent: int = 50
     max_agents_per_run: int = 10
     max_subtasks_per_phase: int = 4
+    evolution_enabled: bool = True
+    evolution_mutation_rate: float = 0.3
+    soul_md_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -148,6 +151,19 @@ class Settings:
                 for p in extra_paths_raw.split(",")
                 if p.strip()
             ],
+            evolution_enabled=_getenv(
+                "CLOSED_CLAW_EVOLUTION_ENABLED", "true", dotenv
+            ).lower() in {"1", "true", "yes"},
+            evolution_mutation_rate=max(
+                0.0,
+                min(1.0, float(_getenv("CLOSED_CLAW_EVOLUTION_MUTATION_RATE", "0.3", dotenv))),
+            ),
+            soul_md_path=(
+                Path(_getenv("CLOSED_CLAW_SOUL_MD", "", dotenv)).resolve()
+                if _getenv("CLOSED_CLAW_SOUL_MD", "", dotenv)
+                else (cwd / "soul.md") if (cwd / "soul.md").exists()
+                else None
+            ),
         )
 
     def ensure_dirs(self) -> None:

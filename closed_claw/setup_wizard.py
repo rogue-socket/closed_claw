@@ -69,91 +69,44 @@ def verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]
 
 
 def _verify_openai(model: str, api_key: str) -> tuple[bool, str]:
-    """Run verify openai."""
-    import httpx
-
-    with httpx.Client(timeout=20) as client:
-        resp = client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "Reply with OK"}],
-                "temperature": 0,
-                "max_tokens": 8,
-            },
-        )
-    if resp.status_code >= 400:
-        return False, f"openai HTTP {resp.status_code}: {resp.text[:160]}"
-    return True, "openai request succeeded"
+    """Verify OpenAI connectivity via the shared LLM client."""
+    return _verify_provider("openai", model, api_key)
 
 
 def _verify_gemini(model: str, api_key: str) -> tuple[bool, str]:
-    """Run verify gemini."""
-    import httpx
-
-    with httpx.Client(timeout=20) as client:
-        resp = client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            params={"key": api_key},
-            json={
-                "contents": [{"parts": [{"text": "Reply with OK"}]}],
-                "generationConfig": {"temperature": 0},
-            },
-        )
-    if resp.status_code >= 400:
-        return False, f"gemini HTTP {resp.status_code}: {resp.text[:160]}"
-    return True, "gemini request succeeded"
+    """Verify Gemini connectivity via the shared LLM client."""
+    return _verify_provider("gemini", model, api_key)
 
 
 def _verify_claude(model: str, api_key: str) -> tuple[bool, str]:
-    """Run verify claude."""
-    import httpx
-
-    with httpx.Client(timeout=20) as client:
-        resp = client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 16,
-                "temperature": 0,
-                "messages": [{"role": "user", "content": "Reply with OK"}],
-            },
-        )
-    if resp.status_code >= 400:
-        return False, f"claude HTTP {resp.status_code}: {resp.text[:160]}"
-    return True, "claude request succeeded"
+    """Verify Claude connectivity via the shared LLM client."""
+    return _verify_provider("claude", model, api_key)
 
 
 def _verify_siemens(model: str, api_key: str) -> tuple[bool, str]:
-    """Run verify siemens."""
-    import httpx
+    """Verify Siemens connectivity via the shared LLM client."""
+    return _verify_provider("siemens", model, api_key)
 
-    with httpx.Client(timeout=20) as client:
-        resp = client.post(
-            "https://api.siemens.com/llm/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "Reply with OK"}],
-                "temperature": 0,
-                "max_tokens": 8,
-            },
+
+def _verify_provider(provider: str, model: str, api_key: str) -> tuple[bool, str]:
+    """Send a tiny probe prompt to *provider* and check for a successful response."""
+    from closed_claw.llm_client import DEFAULT_BASE_URLS, generate_text
+
+    base_url = DEFAULT_BASE_URLS.get(provider, "")
+    try:
+        generate_text(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            timeout_sec=20,
+            prompt="Reply with OK",
+            max_tokens=8,
+            temperature=0,
         )
-    if resp.status_code >= 400:
-        return False, f"siemens HTTP {resp.status_code}: {resp.text[:160]}"
-    return True, "siemens request succeeded"
+        return True, f"{provider} request succeeded"
+    except Exception as exc:
+        return False, f"{provider} verification failed: {exc}"
 
 
 def _choose_provider() -> str:

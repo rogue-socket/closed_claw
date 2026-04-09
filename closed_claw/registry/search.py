@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from closed_claw.config import Settings
 from closed_claw.registry.store import SearchCandidate
+
+logger = logging.getLogger("closed_claw.registry.search")
 
 
 @dataclass(slots=True)
@@ -66,7 +69,7 @@ class LLMReranker:
             if ranked:
                 return ranked
         except Exception:
-            pass
+            logger.exception("LLM reranker failed, falling back to heuristic")
 
         out = self.fallback.rerank(task, candidates)
         return [RerankedCandidate(agent_id=c.agent_id, score=c.score, reason=f"llm_fallback:{c.reason}") for c in out]
@@ -97,63 +100,42 @@ class LLMReranker:
 
     def _call_openai(self, task: str, candidates: list[SearchCandidate]) -> str:
         """Run call openai."""
-        import httpx
-
-        url = f"{self.base_url}/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": self._prompt(task, candidates)}],
-            "temperature": 0,
-        }
-        with httpx.Client(timeout=self.timeout_sec) as client:
-            resp = client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        return _generate_text_with_provider(
+            provider="openai",
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_sec=self.timeout_sec,
+            prompt=self._prompt(task, candidates),
+            max_tokens=800,
+            temperature=0,
+        )
 
     def _call_gemini(self, task: str, candidates: list[SearchCandidate]) -> str:
         """Run call gemini."""
-        import httpx
-
-        url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
-        params = {"key": self.api_key}
-        body = {
-            "contents": [{"parts": [{"text": self._prompt(task, candidates)}]}],
-            "generationConfig": {"temperature": 0},
-        }
-        with httpx.Client(timeout=self.timeout_sec) as client:
-            resp = client.post(url, params=params, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        return _generate_text_with_provider(
+            provider="gemini",
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_sec=self.timeout_sec,
+            prompt=self._prompt(task, candidates),
+            max_tokens=800,
+            temperature=0,
+        )
 
     def _call_claude(self, task: str, candidates: list[SearchCandidate]) -> str:
         """Run call claude."""
-        import httpx
-
-        url = f"{self.base_url}/v1/messages"
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        body = {
-            "model": self.model,
-            "max_tokens": 800,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": self._prompt(task, candidates)}],
-        }
-        with httpx.Client(timeout=self.timeout_sec) as client:
-            resp = client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-
-        text_parts = [block.get("text", "") for block in data.get("content", []) if isinstance(block, dict)]
-        return "\n".join(text_parts)
+        return _generate_text_with_provider(
+            provider="claude",
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_sec=self.timeout_sec,
+            prompt=self._prompt(task, candidates),
+            max_tokens=800,
+            temperature=0,
+        )
 
     def _parse_output(self, text: str, candidates: list[SearchCandidate]) -> list[RerankedCandidate]:
         """Run parse output."""
@@ -287,20 +269,32 @@ def generate_agent_profile(
 
 
 def _extract_json(text: str) -> Any:
-    """Run extract json."""
+    """Extract JSON from LLM output, handling fenced blocks and bare JSON."""
     text = text.strip()
     if not text:
         return {}
+    # 1. Try direct parse
     try:
         return json.loads(text)
     except Exception:
         pass
+    # 2. Try fenced code blocks (non-greedy)
     fence_match = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, flags=re.DOTALL)
     if fence_match:
-        return json.loads(fence_match.group(1))
-    generic_match = re.search(r"(\{.*\}|\[.*\])", text, flags=re.DOTALL)
-    if generic_match:
-        return json.loads(generic_match.group(1))
+        try:
+            return json.loads(fence_match.group(1))
+        except Exception:
+            pass
+    # 3. Iterate over each '{' or '[' and use raw_decode to parse the first
+    #    valid JSON object/array (tolerates trailing text after the JSON).
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch in ("{", "["):
+            try:
+                obj, _ = decoder.raw_decode(text, i)
+                return obj
+            except json.JSONDecodeError:
+                continue
     raise ValueError("LLM response did not contain valid JSON")
 
 
@@ -368,21 +362,7 @@ def generate_agent_description(settings: Settings, task: str) -> str:
             "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens and the matching API key."
         )
 
-    key = settings.llm_api_key.strip()
-    if provider == "openai":
-        key = key or settings.openai_api_key.strip()
-        base = settings.openai_base_url.rstrip("/")
-    elif provider == "gemini":
-        key = key or settings.gemini_api_key.strip()
-        base = settings.gemini_base_url.rstrip("/")
-    elif provider == "claude":
-        key = key or settings.anthropic_api_key.strip()
-        base = settings.anthropic_base_url.rstrip("/")
-    elif provider == "siemens":
-        key = key or settings.siemens_api_key.strip()
-        base = settings.siemens_base_url.rstrip("/")
-    else:
-        raise ValueError(f"Unsupported LLM provider: {provider!r}.")
+    key, base = _provider_key_and_base(settings, provider)
     if not key:
         raise ValueError(f"No API key found for provider {provider!r}. Set the matching key in .env.")
 
@@ -392,68 +372,21 @@ def generate_agent_description(settings: Settings, task: str) -> str:
         f"Task: {task}"
     )
     try:
-        import httpx
-
-        if provider in ("openai", "siemens"):
-            url = f"{base}/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            body = {
-                "model": settings.llm_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
-                "max_tokens": 60,
-            }
-            with httpx.Client(timeout=settings.llm_timeout_sec) as client:
-                resp = client.post(url, headers=headers, json=body)
-                resp.raise_for_status()
-                text = resp.json()["choices"][0]["message"]["content"]
-                return _clean_description(text, "")
-
-        if provider == "gemini":
-            url = f"{base}/v1beta/models/{settings.llm_model}:generateContent"
-            with httpx.Client(timeout=settings.llm_timeout_sec) as client:
-                resp = client.post(
-                    url,
-                    params={"key": key},
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"temperature": 0.2},
-                    },
-                )
-                resp.raise_for_status()
-                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return _clean_description(text, "")
-
-        if provider == "claude":
-            url = f"{base}/v1/messages"
-            with httpx.Client(timeout=settings.llm_timeout_sec) as client:
-                resp = client.post(
-                    url,
-                    headers={
-                        "x-api-key": key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": settings.llm_model,
-                        "max_tokens": 60,
-                        "temperature": 0.2,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
-                resp.raise_for_status()
-                parts = [
-                    block.get("text", "")
-                    for block in resp.json().get("content", [])
-                    if isinstance(block, dict)
-                ]
-                return _clean_description(" ".join(parts), "")
+        text = _generate_text_with_provider(
+            provider=provider,
+            model=settings.llm_model,
+            api_key=key,
+            base_url=base,
+            timeout_sec=settings.llm_timeout_sec,
+            prompt=prompt,
+            max_tokens=60,
+            temperature=0.2,
+        )
+        return _clean_description(text, "")
     except Exception as exc:
         raise RuntimeError(
             f"LLM call failed during agent description generation ({provider}): {exc}"
         ) from exc
-
-    raise RuntimeError(f"Provider {provider!r} matched no HTTP branch — this should not be reached.")
 
 
 def _clean_description(text: str, fallback: str) -> str:
@@ -462,6 +395,58 @@ def _clean_description(text: str, fallback: str) -> str:
     if not clean:
         return fallback
     return clean[:200]
+
+
+def classify_task_complexity(settings: Settings, task: str) -> str:
+    """Classify a task as 'simple' or 'complex' using a cheap LLM call.
+
+    Simple tasks can be executed directly without a discovery phase.
+    Complex tasks need information gathering before execution planning.
+
+    Returns 'complex' on any failure (safe default — never skips discovery by accident).
+    Raises ValueError when no real LLM is configured.
+    """
+    provider = settings.llm_provider.lower()
+    if provider == "heuristic":
+        raise ValueError(
+            "LLM provider required for task classification. "
+            "Set CLOSED_CLAW_LLM_PROVIDER=openai|gemini|claude|siemens and the matching API key."
+        )
+    key, base = _provider_key_and_base(settings, provider)
+    if not key:
+        raise ValueError(
+            f"No API key found for provider {provider!r}. Set the matching key in .env."
+        )
+
+    prompt = (
+        "Classify this task as SIMPLE or COMPLEX.\n"
+        "SIMPLE: can be done in one step with no prior exploration or multi-source "
+        "information gathering needed. Examples: list files, run a command, read one file, "
+        "answer a factual question.\n"
+        "COMPLEX: requires discovering information from multiple sources, exploring a "
+        "codebase, or gathering context before forming an execution plan.\n\n"
+        f"Task: {task.strip()}\n\n"
+        'Return JSON only: {"complexity": "simple" or "complex"}'
+    )
+    try:
+        text = _generate_text_with_provider(
+            provider=provider,
+            model=settings.llm_model,
+            api_key=key,
+            base_url=base,
+            timeout_sec=settings.llm_timeout_sec,
+            prompt=prompt,
+            max_tokens=30,
+            temperature=0,
+        )
+        payload = _extract_json(text)
+        if isinstance(payload, dict):
+            complexity = str(payload.get("complexity", "complex")).strip().lower()
+            if complexity in ("simple", "complex"):
+                return complexity
+    except Exception:
+        logger.debug("task complexity classification failed, defaulting to complex", exc_info=True)
+    return "complex"
 
 
 def generate_task_plan(
@@ -560,21 +545,9 @@ def _task_plan_prompt(task: str, phase: str, discovery_results: dict[str, str]) 
 
 
 def _provider_key_and_base(settings: Settings, provider: str) -> tuple[str, str]:
-    """Run provider key and base."""
-    key = settings.llm_api_key.strip()
-    if provider == "openai":
-        key = key or settings.openai_api_key.strip()
-        return key, settings.openai_base_url.rstrip("/")
-    if provider == "gemini":
-        key = key or settings.gemini_api_key.strip()
-        return key, settings.gemini_base_url.rstrip("/")
-    if provider == "claude":
-        key = key or settings.anthropic_api_key.strip()
-        return key, settings.anthropic_base_url.rstrip("/")
-    if provider == "siemens":
-        key = key or settings.siemens_api_key.strip()
-        return key, settings.siemens_base_url.rstrip("/")
-    return "", ""
+    """Backward-compatible alias — delegates to :mod:`closed_claw.llm_client`."""
+    from closed_claw.llm_client import provider_key_and_base
+    return provider_key_and_base(settings, provider)
 
 
 def _generate_text_with_provider(
@@ -588,61 +561,43 @@ def _generate_text_with_provider(
     max_tokens: int,
     temperature: float,
 ) -> str:
-    """Run generate text with provider."""
-    import httpx
+    """Backward-compatible alias — delegates to :mod:`closed_claw.llm_client`."""
+    from closed_claw.llm_client import generate_text
+    return generate_text(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_sec=timeout_sec,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
 
-    if provider in ("openai", "siemens"):
-        with httpx.Client(timeout=timeout_sec) as client:
-            resp = client.post(
-                f"{base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
 
-    if provider == "gemini":
-        with httpx.Client(timeout=timeout_sec) as client:
-            resp = client.post(
-                f"{base_url}/v1beta/models/{model}:generateContent",
-                params={"key": api_key},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": temperature},
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-    if provider == "claude":
-        with httpx.Client(timeout=timeout_sec) as client:
-            resp = client.post(
-                f"{base_url}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            resp.raise_for_status()
-            parts = [
-                block.get("text", "")
-                for block in resp.json().get("content", [])
-                if isinstance(block, dict)
-            ]
-            return " ".join(parts)
-    raise ValueError(f"unsupported provider: {provider}")
+def _narrow_tools_by_task(task: str, tools: list[str], max_fallback: int = 3) -> list[str]:
+    """Narrow an over-broad tool list using keyword heuristics on the task."""
+    task_lower = task.lower()
+    # Keyword groups → relevant tools
+    _KEYWORD_TOOLS: list[tuple[list[str], list[str]]] = [
+        (["file", "read", "write", "directory", "folder", "path"], ["file_io"]),
+        (["web", "http", "url", "fetch", "page", "browse", "scrape"], ["web_fetch", "http_api"]),
+        (["code", "python", "script", "run", "execute", "compute"], ["file_io", "python_exec"]),
+        (["sql", "database", "query", "table"], ["sql_query", "file_io"]),
+        (["command", "shell", "terminal", "install", "git", "pip"], ["terminal"]),
+        (["api", "request", "endpoint", "post", "get"], ["http_api"]),
+    ]
+    matched: list[str] = []
+    for keywords, tool_set in _KEYWORD_TOOLS:
+        if any(kw in task_lower for kw in keywords):
+            for t in tool_set:
+                if t in tools and t not in matched:
+                    matched.append(t)
+    if matched:
+        return matched[:max_fallback]
+    # Default fallback: most common 3
+    default = ["file_io", "terminal", "web_fetch"]
+    return [t for t in default if t in tools][:max_fallback]
 
 
 def _normalize_profile_payload(
@@ -664,6 +619,11 @@ def _normalize_profile_payload(
     tools = [t for t in requested_tools if isinstance(t, str) and t in supported_tools]
     if not tools:
         tools = [t for t in fallback_tools if t in supported_tools]
+
+    # Narrow over-broad fallback profiles: if all tools were granted via fallback
+    # and the profile looks generic, cap to a task-relevant subset.
+    if len(tools) > 3 and tools == [t for t in fallback_tools if t in supported_tools]:
+        tools = _narrow_tools_by_task(task, tools)
 
     requested_tags = payload.get("tags", [])
     tags = [t for t in requested_tags if isinstance(t, str) and t.strip()]

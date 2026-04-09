@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,9 @@ class AgentManifest(BaseModel):
     success_rate: float = 0.0
     avg_latency_ms: float | None = None
     status: str = "active"
+    genome_json: str = "{}"
+    lineage_json: str = "{}"
+    fitness_score: float = 0.0
 
 
 @dataclass(slots=True)
@@ -57,19 +61,24 @@ class RegistryStore:
         self.embedding_dim = embedding_dim
         self.require_sqlite_vec = require_sqlite_vec
         self.sqlite_vec_available = False
-        self._cached_conn: sqlite3.Connection | None = None
+        self._local = threading.local()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
-        """Return a cached DB connection, creating one if needed."""
-        if self._cached_conn is not None:
+        """Return a per-thread cached DB connection, creating one if needed.
+
+        Uses ``threading.local()`` so each thread gets its own SQLite
+        connection, avoiding ``ProgrammingError`` when the web server
+        handles requests on worker threads.
+        """
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
             try:
-                # Verify the cached connection is still usable
-                self._cached_conn.execute("SELECT 1")
-                return self._cached_conn
+                conn.execute("SELECT 1")
+                return conn
             except Exception:
-                self._cached_conn = None
+                conn = None
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -81,42 +90,45 @@ class RegistryStore:
                 raise RuntimeError(
                     "sqlite-vec extension is required but failed to load."
                 ) from exc
-        self._cached_conn = conn
+        self._local.conn = conn
         return conn
 
     def close(self) -> None:
-        """Close the cached connection if open."""
-        if self._cached_conn is not None:
+        """Close the current thread's cached connection if open."""
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
             try:
-                self._cached_conn.close()
+                conn.close()
             except Exception:
                 pass
-            self._cached_conn = None
+            self._local.conn = None
 
     def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
         """Run try load sqlite vec."""
         if not hasattr(conn, "enable_load_extension"):
             return False
         conn.enable_load_extension(True)
-
-        # Preferred: package-provided loader resolves the real shared library path.
         try:
-            import sqlite_vec  # type: ignore
+            # Preferred: package-provided loader resolves the real shared library path.
+            try:
+                import sqlite_vec  # type: ignore
 
-            sqlite_vec.load(conn)
+                sqlite_vec.load(conn)
+                return True
+            except Exception:
+                pass
+
+            # Fallback: explicit path via env var.
+            ext_path = os.getenv("SQLITE_VEC_PATH")
+            if ext_path:
+                conn.load_extension(ext_path)
+                return True
+
+            # Final fallback: default shared library name on platform loader path.
+            conn.load_extension("sqlite_vec")
             return True
-        except Exception:
-            pass
-
-        # Fallback: explicit path via env var.
-        ext_path = os.getenv("SQLITE_VEC_PATH")
-        if ext_path:
-            conn.load_extension(ext_path)
-            return True
-
-        # Final fallback: default shared library name on platform loader path.
-        conn.load_extension("sqlite_vec")
-        return True
+        finally:
+            conn.enable_load_extension(False)
 
     def _init_db(self) -> None:
         """Run init db."""
@@ -138,6 +150,20 @@ class RegistryStore:
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # Migration: add evolution columns if missing
+            for col, default in [
+                ("genome_json", "'{}'"),
+                ("lineage_json", "'{}'"),
+                ("fitness_score", "0.0"),
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE agents ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}"
+                        if "json" in col
+                        else f"ALTER TABLE agents ADD COLUMN {col} REAL NOT NULL DEFAULT {default}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     @staticmethod
     def _has_agent_vectors_table(conn: sqlite3.Connection) -> bool:
@@ -156,8 +182,9 @@ class RegistryStore:
                     agent_id, name, description, embedding_model, embedding_dim,
                     embedding_json, tools_allowlist_json, tags_json, api_capabilities_json,
                     requires_approval_for_json, skill_ids_json, version, created_at, last_used_at,
-                    usage_count, success_count, failure_count, success_rate, avg_latency_ms, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    usage_count, success_count, failure_count, success_rate, avg_latency_ms, status,
+                    genome_json, lineage_json, fitness_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
@@ -176,7 +203,10 @@ class RegistryStore:
                     failure_count=excluded.failure_count,
                     success_rate=excluded.success_rate,
                     avg_latency_ms=excluded.avg_latency_ms,
-                    status=excluded.status
+                    status=excluded.status,
+                    genome_json=excluded.genome_json,
+                    lineage_json=excluded.lineage_json,
+                    fitness_score=excluded.fitness_score
                 """,
                 (
                     manifest.agent_id,
@@ -199,6 +229,9 @@ class RegistryStore:
                     manifest.success_rate,
                     manifest.avg_latency_ms,
                     manifest.status,
+                    manifest.genome_json,
+                    manifest.lineage_json,
+                    manifest.fitness_score,
                 ),
             )
             if self.sqlite_vec_available and self._has_agent_vectors_table(conn):
@@ -217,6 +250,7 @@ class RegistryStore:
                 return None
             # skill_ids_json may not exist in older databases
             skill_ids_raw = row["skill_ids_json"] if "skill_ids_json" in row.keys() else "[]"
+            keys = row.keys()
             return AgentManifest(
                 agent_id=row["agent_id"],
                 name=row["name"],
@@ -237,6 +271,9 @@ class RegistryStore:
                 success_rate=row["success_rate"],
                 avg_latency_ms=row["avg_latency_ms"],
                 status=row["status"],
+                genome_json=row["genome_json"] if "genome_json" in keys else "{}",
+                lineage_json=row["lineage_json"] if "lineage_json" in keys else "{}",
+                fitness_score=float(row["fitness_score"]) if "fitness_score" in keys else 0.0,
             )
 
     def semantic_search(self, query_vector: list[float], k: int = 5) -> list[SearchCandidate]:
@@ -381,6 +418,37 @@ class RegistryStore:
                 """,
                 (provider,),
             )
+
+    def update_agent_status(self, agent_id: str, status: str) -> None:
+        """Update the status field of an agent (e.g. 'active' -> 'degraded')."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE agents SET status = ? WHERE agent_id = ?",
+                (status, agent_id),
+            )
+
+    def update_fitness(self, agent_id: str, fitness_score: float) -> None:
+        """Update the fitness_score of an agent after a run evaluation."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE agents SET fitness_score = ? WHERE agent_id = ?",
+                (fitness_score, agent_id),
+            )
+
+    def find_agents_by_tag(self, tag: str, status: str = "active") -> list[dict[str, object]]:
+        """Return agents whose tags_json contains *tag*, filtered by status."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT agent_id, tags_json, genome_json, lineage_json, fitness_score, status "
+                "FROM agents WHERE status = ?",
+                (status,),
+            ).fetchall()
+            results: list[dict[str, object]] = []
+            for row in rows:
+                tags = json.loads(row["tags_json"]) if row["tags_json"] else []
+                if tag in tags:
+                    results.append(dict(row))
+            return results
 
     def list_agents(self, limit: int = 100) -> list[dict[str, object]]:
         """Run list agents."""

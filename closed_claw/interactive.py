@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from collections.abc import Callable
 
 
-def run_main_menu(handlers: dict[str, callable]) -> int:
+def run_main_menu(handlers: dict[str, Callable[..., object]]) -> int:
     """Run run main menu."""
     _print_launch_art()
     while True:
@@ -79,7 +80,7 @@ def run_main_menu(handlers: dict[str, callable]) -> int:
             print("Invalid choice. Try again.")
 
 
-def _run_task_interactive(handlers: dict[str, callable]) -> None:
+def _run_task_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run run task interactive."""
     raw_task = _safe_input("Task: ")
     if raw_task is None:
@@ -123,7 +124,7 @@ def _run_task_interactive(handlers: dict[str, callable]) -> None:
     )
 
 
-def _delete_agent_interactive(handlers: dict[str, callable]) -> None:
+def _delete_agent_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run delete agent interactive."""
     raw = _safe_input("Agent ID to delete: ")
     if raw is None:
@@ -140,7 +141,7 @@ def _delete_agent_interactive(handlers: dict[str, callable]) -> None:
     handlers["delete_agent"](Namespace(agent_id=agent_id, yes=True))
 
 
-def _delete_all_agents_interactive(handlers: dict[str, callable]) -> None:
+def _delete_all_agents_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run delete all agents interactive."""
     confirm = _safe_input("Type 'DELETE ALL' to permanently remove all agents: ")
     if (confirm or "").strip() != "DELETE ALL":
@@ -149,7 +150,7 @@ def _delete_all_agents_interactive(handlers: dict[str, callable]) -> None:
     handlers["delete_all_agents"](Namespace(yes=True))
 
 
-def _cancel_run_interactive(handlers: dict[str, callable]) -> None:
+def _cancel_run_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run cancel run interactive."""
     raw = _safe_input("Run ID to gracefully stop: ")
     run_id = (raw or "").strip()
@@ -159,14 +160,14 @@ def _cancel_run_interactive(handlers: dict[str, callable]) -> None:
     handlers["cancel_run"](Namespace(run_id=run_id))
 
 
-def _tools_interactive(handlers: dict[str, callable]) -> None:
+def _tools_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run tools interactive."""
     raw = _safe_input("Agent ID [blank for global tools]: ")
     agent_id = (raw or "").strip() or None
     handlers["tools"](Namespace(agent_id=agent_id))
 
 
-def _agent_details_interactive(handlers: dict[str, callable]) -> None:
+def _agent_details_interactive(handlers: dict[str, Callable[..., object]]) -> None:
     """Run agent details interactive."""
     raw = _safe_input("Agent ID: ")
     agent_id = (raw or "").strip()

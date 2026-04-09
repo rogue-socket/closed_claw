@@ -11,6 +11,9 @@ agents/
 test_folder/
 test_folder*/
 
+# Temporary docs
+docs/temp/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -27,6 +30,8 @@ htmlcov/
 
 # SQLite databases (runtime state)
 *.db
+*.sqlite
+*.sqlite3
 
 # Logs
 *.log

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import MISSING
 from typing import Any, Callable
@@ -29,6 +30,15 @@ except Exception:
             return field(default=default)
         return field()
 
+    def _resolve_class_default(value: Any) -> Any:
+        """If *value* is a dataclasses.Field descriptor, produce a real default."""
+        if isinstance(value, dataclasses.Field):
+            if value.default is not MISSING:
+                return value.default
+            if value.default_factory is not MISSING:  # type: ignore[arg-type]
+                return value.default_factory()  # type: ignore[misc]
+        return value
+
     class BaseModel:
         def __init__(self, **kwargs: Any) -> None:
             """Initialize the instance."""
@@ -45,7 +55,7 @@ except Exception:
                     setattr(self, name, value)
                     continue
                 if hasattr(self.__class__, name):
-                    setattr(self, name, getattr(self.__class__, name))
+                    setattr(self, name, _resolve_class_default(getattr(self.__class__, name)))
                     continue
                 raise TypeError(f"Missing required field: {name}")
 

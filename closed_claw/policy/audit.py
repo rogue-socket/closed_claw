@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from closed_claw.policy.approval import ApprovalDecision, ApprovalRequest
+
+logger = logging.getLogger("closed_claw.policy.audit")
 
 
 class AuditStore:
@@ -15,13 +18,24 @@ class AuditStore:
         """Initialize the instance."""
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cached_conn: sqlite3.Connection | None = None
         self._init_tables()
 
     def _conn(self) -> sqlite3.Connection:
-        """Run conn."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Return a cached connection (created on first call)."""
+        if self._cached_conn is None:
+            self._cached_conn = sqlite3.connect(self.db_path)
+            self._cached_conn.row_factory = sqlite3.Row
+        return self._cached_conn
+
+    def close(self) -> None:
+        """Close the cached connection if open."""
+        if self._cached_conn is not None:
+            try:
+                self._cached_conn.close()
+            except Exception:
+                pass
+            self._cached_conn = None
 
     def _init_tables(self) -> None:
         """Run init tables."""

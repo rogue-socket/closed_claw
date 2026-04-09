@@ -2,65 +2,158 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
+import os
+import re
+import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("closed_claw.tools")
 
 
 class ToolExecutionError(RuntimeError):
     pass
 
 
+class _HTMLTextExtractor:
+    """Stdlib-only HTML-to-text extractor (no BeautifulSoup dependency)."""
+
+    def __init__(self) -> None:
+        from html.parser import HTMLParser
+
+        class _Parser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.pieces: list[str] = []
+                self._skip = False
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style", "noscript", "svg"):
+                    self._skip = True
+                elif tag in ("br", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr"):
+                    self.pieces.append("\n")
+
+            def handle_endtag(self, tag):
+                if tag in ("script", "style", "noscript", "svg"):
+                    self._skip = False
+
+            def handle_data(self, data):
+                if not self._skip:
+                    self.pieces.append(data)
+
+        self._parser = _Parser()
+
+    def extract(self, html: str, max_chars: int = 8000) -> str:
+        import re
+
+        self._parser.feed(html)
+        raw = " ".join(self._parser.pieces)
+        text = re.sub(r"[ \t]+", " ", raw)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()[:max_chars]
+
+
 SUPPORTED_TOOLS = ["terminal", "http_api", "web_fetch", "file_io", "python_exec", "sql_query"]
 
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "terminal": {
-        "description": "Run a shell command in the workspace.",
-        "args_schema": {"cmd": "string", "timeout_s": "int(optional)"},
+        "name": "terminal",
+        "description": (
+            "Run a command-line program in the workspace directory. "
+            "Use for: running build tools (npm, pip, make), git operations, "
+            "listing processes, checking system info, or any CLI utility. "
+            "Commands are executed WITHOUT a shell — no pipes, redirections, or "
+            "chaining (&&, ||, ;). Pass a single program with arguments. "
+            "Destructive commands (rm -rf, format, dd) are blocked."
+        ),
+        "args_schema": {"cmd": "string", "timeout_s": "int(optional, default=15)"},
+        "risk_level": "high",
+        "side_effects": True,
     },
     "http_api": {
-        "description": "Make an HTTP request and return status/body snippet.",
+        "name": "http_api",
+        "description": (
+            "Make an HTTP request to a REST API endpoint and return the response. "
+            "Supports GET, POST, PUT, PATCH, DELETE methods. Use for: calling "
+            "external APIs, webhooks, or services. Returns status code, headers, "
+            "and response body (truncated to 10KB)."
+        ),
         "args_schema": {
             "method": "string(optional, default=GET)",
             "url": "string",
             "headers": "object(optional)",
             "json": "object(optional)",
             "params": "object(optional)",
-            "timeout_s": "float(optional)",
+            "timeout_s": "float(optional, default=20)",
         },
+        "risk_level": "medium",
+        "side_effects": True,
     },
     "web_fetch": {
-        "description": "Fetch a webpage by URL and return status/body snippet.",
-        "args_schema": {"url": "string", "timeout_s": "float(optional)"},
+        "name": "web_fetch",
+        "description": (
+            "Fetch a webpage by URL and return its text content. "
+            "HTML is automatically stripped to plain text. "
+            "Use for: reading documentation, checking web pages, scraping data. "
+            "Returns status code, extracted text, and content type."
+        ),
+        "args_schema": {"url": "string", "timeout_s": "float(optional, default=20)"},
+        "risk_level": "low",
+        "side_effects": False,
     },
     "file_io": {
-        "description": "List directories and read/write/append text files inside allowed roots.",
+        "name": "file_io",
+        "description": (
+            "Read, write, append, or list files and directories inside the workspace. "
+            "Operations: 'list' (directory listing), 'read' (file content), "
+            "'write' (create/overwrite), 'append' (add to end). "
+            "Path must be within allowed workspace roots — escapes are blocked. "
+            "Use for: reading source code, writing outputs, exploring project structure."
+        ),
         "args_schema": {
             "op": "string(list|read|write|append)",
             "path": "string",
-            "content": "string(optional for write/append)",
-            "recursive": "bool(optional for list)",
-            "max_entries": "int(optional for list)",
+            "content": "string(required for write/append)",
+            "recursive": "bool(optional for list, default=false)",
+            "max_entries": "int(optional for list, default=200, max=2000)",
         },
+        "risk_level": "medium",
+        "side_effects": True,
     },
     "python_exec": {
+        "name": "python_exec",
         "description": (
-            "Execute a short Python snippet. "
+            "Execute a Python code snippet and return stdout/stderr/returncode. "
+            "Use for: data processing, calculations, file transformations, "
+            "testing snippets, or any task best expressed in Python. "
             "IMPORTANT: stdin is closed — code must NOT use input(), sys.stdin, "
-            "or any interactive prompts. Use hardcoded values or function args instead. "
-            "Scripts with input() will receive immediate EOF and fail."
+            "or any interactive prompts. Use hardcoded values or function args instead."
         ),
-        "args_schema": {"code": "string", "timeout_s": "int(optional)"},
+        "args_schema": {"code": "string", "timeout_s": "int(optional, default=15)"},
+        "risk_level": "high",
+        "side_effects": True,
     },
     "sql_query": {
-        "description": "Execute a SELECT query on a SQLite database file.",
+        "name": "sql_query",
+        "description": (
+            "Execute a read-only SELECT query on a SQLite database file. "
+            "Use for: inspecting database contents, querying structured data, "
+            "checking schema information. Only SELECT statements are allowed — "
+            "INSERT/UPDATE/DELETE/DROP are rejected. Database is opened in read-only mode."
+        ),
         "args_schema": {
             "db_path": "string",
             "query": "string(SELECT only)",
             "params": "array(optional)",
         },
+        "risk_level": "low",
+        "side_effects": False,
     },
 }
 
@@ -75,6 +168,14 @@ def tool_registry_for_allowlist(allowlist: list[str]) -> list[dict[str, Any]]:
 
 
 class ToolExecutor:
+    # Maximum size of stdout/stderr returned from terminal/python_exec
+    _MAX_OUTPUT_BYTES = 50_000
+    # Maximum Python code size (prevents accidentally dumping huge blobs)
+    _MAX_CODE_SIZE = 30_000
+    # Blocked non-HTTP URL schemes (SSRF protection)
+    _BLOCKED_SCHEMES = ("file://", "ftp://", "gopher://", "data:")
+    # Well-known cloud metadata hostnames to block before DNS resolution
+    _METADATA_HOSTS = frozenset({"metadata.google.internal", "169.254.169.254"})
     # Common LLM arg-name mistakes → canonical arg names per tool.
     # Defence-in-depth: even when the prompt tells the LLM the correct names,
     # some models still use natural-language aliases like "command" for "cmd".
@@ -117,6 +218,55 @@ class ToolExecutor:
             normalized[canonical] = value
         return normalized
 
+    def _check_url_safety(self, url: str) -> None:
+        """Block requests to internal/dangerous URLs (SSRF prevention).
+
+        Resolves the hostname to IP address(es) and rejects any private,
+        loopback, link-local, or reserved address.  This defeats encoding
+        tricks (octal/decimal/hex IPs) and DNS rebinding of known prefixes.
+        """
+        from urllib.parse import urlparse
+
+        lower = url.lower()
+        for scheme in self._BLOCKED_SCHEMES:
+            if lower.startswith(scheme):
+                raise ToolExecutionError(
+                    f"URL blocked by security policy: disallowed scheme '{scheme}'"
+                )
+
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ToolExecutionError("URL blocked by security policy: no hostname")
+
+        if hostname in self._METADATA_HOSTS:
+            raise ToolExecutionError(
+                f"URL blocked by security policy: metadata endpoint '{hostname}'"
+            )
+
+        # Resolve hostname → IP(s) and reject private/reserved addresses
+        try:
+            addrinfos = socket.getaddrinfo(hostname, parsed.port or 80, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            raise ToolExecutionError(
+                f"URL blocked by security policy: cannot resolve hostname '{hostname}'"
+            )
+
+        for _family, _type, _proto, _canonname, sockaddr in addrinfos:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ToolExecutionError(
+                    f"URL blocked by security policy: '{hostname}' resolves to "
+                    f"non-public address {ip}"
+                )
+
+    @staticmethod
+    def _truncate_output(text: str, max_bytes: int = 50_000) -> str:
+        """Truncate tool output to prevent memory bloat."""
+        if len(text) <= max_bytes:
+            return text
+        return text[:max_bytes] + f"\n... [truncated, {len(text)} total chars]"
+
     def execute(self, tool: str, args: dict[str, Any], allowlist: list[str]) -> dict[str, Any]:
         """Run execute."""
         if tool not in allowlist:
@@ -139,15 +289,60 @@ class ToolExecutor:
             return self._sql_query(args)
         raise ToolExecutionError(f"unknown tool: {tool}")
 
+    # Deny-list of dangerous command patterns — matched against the full
+    # command string *before* execution.  Each entry is a compiled regex.
+    _COMMAND_DENYLIST: list[re.Pattern[str]] = [
+        re.compile(p, re.IGNORECASE)
+        for p in [
+            r"\brm\s+(-\S+\s+)*-r\s*f\b",       # rm -rf
+            r"\brm\s+(-\S+\s+)*-f\s*r\b",       # rm -fr
+            r"\brmdir\s+/s\b",                    # Windows rmdir /s
+            r"\bformat\s+[a-zA-Z]:",              # format drive
+            r"\bmkfs\b",                           # make filesystem
+            r"\bdd\s+.*\bof=",                    # dd to device/file
+            r":;\s*\)\s*;",                        # fork bomb pattern :(){ :|:& };:
+            r">\s*/dev/sd[a-z]",                   # write to raw device
+            r"\bcurl\b.*\|\s*(ba)?sh",             # curl pipe to shell
+            r"\bwget\b.*\|\s*(ba)?sh",             # wget pipe to shell
+            r"\bchmod\s+(-\S+\s+)*777\b",         # world-writable
+            r"\bnc\s+-\S*[el]",                    # netcat listen/exec
+            r"\bpowershell\b.*-e(nc(oded)?c(ommand)?)?",  # encoded PowerShell
+        ]
+    ]
+
     def _terminal(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Run terminal."""
+        """Execute a command without shell=True to prevent injection.
+
+        The command string is split using shlex.split, preventing shell
+        metacharacter attacks (;, &&, |, $(), backticks, etc.).
+        A denylist catches known destructive patterns before execution.
+        """
         cmd = str(args.get("cmd", "")).strip()
         if not cmd:
             raise ToolExecutionError("terminal requires non-empty 'cmd'")
+
+        # Check denylist before execution
+        for pattern in self._COMMAND_DENYLIST:
+            if pattern.search(cmd):
+                raise ToolExecutionError(
+                    f"command blocked by security policy: matches denylist pattern '{pattern.pattern}'"
+                )
+
         timeout_s = int(args.get("timeout_s", 15))
+
+        # Split command into argv list — this prevents shell injection
+        # by removing metacharacter interpretation.
+        try:
+            argv = shlex.split(cmd, posix=(sys.platform != "win32"))
+        except ValueError as exc:
+            raise ToolExecutionError(f"invalid command syntax: {exc}") from exc
+
+        if not argv:
+            raise ToolExecutionError("terminal requires non-empty 'cmd'")
+
         proc = subprocess.run(
-            cmd,
-            shell=True,
+            argv,
+            shell=False,
             cwd=self.workspace_root,
             capture_output=True,
             text=True,
@@ -155,8 +350,8 @@ class ToolExecutor:
         )
         return {
             "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout": self._truncate_output(proc.stdout, self._MAX_OUTPUT_BYTES),
+            "stderr": self._truncate_output(proc.stderr, self._MAX_OUTPUT_BYTES),
         }
 
     def _http_api(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +362,7 @@ class ToolExecutor:
         url = str(args.get("url", "")).strip()
         if not url:
             raise ToolExecutionError("http_api requires 'url'")
+        self._check_url_safety(url)
         timeout = float(args.get("timeout_s", 20))
         headers = args.get("headers") or {}
         payload = args.get("json")
@@ -186,20 +382,44 @@ class ToolExecutor:
         url = str(args.get("url", "")).strip()
         if not url:
             raise ToolExecutionError("web_fetch requires 'url'")
+        self._check_url_safety(url)
         with httpx.Client(timeout=float(args.get("timeout_s", 20))) as client:
             resp = client.get(url)
-        return {"status_code": resp.status_code, "text": resp.text[:10000]}
+        content_type = resp.headers.get("content-type", "")
+        raw_text = resp.text
+        if "html" in content_type.lower():
+            text = _HTMLTextExtractor().extract(raw_text)
+        else:
+            text = raw_text[:10000]
+        return {
+            "status_code": resp.status_code,
+            "text": text,
+            "content_type": content_type,
+            "raw_length": len(raw_text),
+        }
 
     def _safe_path(self, path_str: str) -> Path:
-        """Run safe path."""
+        """Validate that *path_str* resolves to a location inside allowed roots.
+
+        Defence-in-depth: we check both the logical path (``strict=False``,
+        without following symlinks) *and* the fully-resolved path so that a
+        symlink placed inside the workspace cannot redirect access outside.
+        """
         path = Path(path_str).expanduser()
         if not path.is_absolute():
-            path = (self.workspace_root / path).resolve()
-        else:
-            path = path.resolve()
-        if not any(root == path or root in path.parents for root in self.allowed_roots):
+            path = self.workspace_root / path
+
+        # Check the logical path (no symlink resolution) first
+        logical = Path(os.path.normpath(path))
+        if not any(root == logical or root in logical.parents for root in self.allowed_roots):
             raise ToolExecutionError("file path escapes workspace")
-        return path
+
+        # Also check fully resolved path (follows symlinks) to block symlink escapes
+        resolved = path.resolve()
+        if not any(root == resolved or root in resolved.parents for root in self.allowed_roots):
+            raise ToolExecutionError("file path escapes workspace (symlink target outside allowed roots)")
+
+        return resolved
 
     def _file_io(self, args: dict[str, Any]) -> dict[str, Any]:
         """Run file io."""
@@ -263,6 +483,10 @@ class ToolExecutor:
         code = str(args.get("code", "")).strip()
         if not code:
             raise ToolExecutionError("python_exec requires 'code'")
+        if len(code) > self._MAX_CODE_SIZE:
+            raise ToolExecutionError(
+                f"python_exec code exceeds maximum size ({len(code)} > {self._MAX_CODE_SIZE})"
+            )
         timeout_s = int(args.get("timeout_s", 15))
 
         # Detect interactive stdin patterns — warn but still run (stdin is
@@ -292,9 +516,21 @@ class ToolExecutor:
             stderr = interactive_warning + stderr
         return {
             "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": stderr,
+            "stdout": self._truncate_output(proc.stdout, self._MAX_OUTPUT_BYTES),
+            "stderr": self._truncate_output(stderr, self._MAX_OUTPUT_BYTES),
         }
+
+    # Patterns forbidden in SQL queries (beyond the SELECT-only check).
+    _SQL_DENYLIST: list[re.Pattern[str]] = [
+        re.compile(p, re.IGNORECASE)
+        for p in [
+            r";",                       # multi-statement
+            r"\bATTACH\b",              # attach external DB
+            r"\bDETACH\b",
+            r"\bload_extension\b",      # dynamic extension loading
+            r"\bPRAGMA",                # configuration changes (also pragma_* functions)
+        ]
+    ]
 
     def _sql_query(self, args: dict[str, Any]) -> dict[str, Any]:
         """Run sql query."""
@@ -306,6 +542,11 @@ class ToolExecutor:
             raise ToolExecutionError("sql_query requires 'query'")
         if not query.lower().startswith("select"):
             raise ToolExecutionError("sql_query only allows SELECT statements")
+        for pattern in self._SQL_DENYLIST:
+            if pattern.search(query):
+                raise ToolExecutionError(
+                    f"sql_query blocked: query contains forbidden pattern '{pattern.pattern}'"
+                )
         params = args.get("params") or []
 
         # Open in read-only mode to prevent any data mutation

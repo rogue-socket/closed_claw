@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -19,8 +20,19 @@ from closed_claw.runtime.protocol import (
     parse_agent_line,
 )
 
+logger = logging.getLogger(__name__)
+
 ApprovalCallback = Callable[[ApiCallIntent, str], Awaitable[ApiCallDecision]]
 ToolCallback = Callable[[ToolCallIntent, str], Awaitable[ToolCallResult]]
+
+# Tools that may produce different results on repeated identical calls
+# (side-effects, mutable state, etc.) and should NOT be deduplicated.
+_SIDE_EFFECT_TOOLS: frozenset[str] = frozenset({"terminal", "python_exec"})
+
+
+def _tool_cache_key(intent: ToolCallIntent) -> str:
+    """Build a deterministic cache key from a tool call intent."""
+    return f"{intent.tool}:{json.dumps(intent.args, sort_keys=True)}"
 
 
 class AgentRuntimeError(RuntimeError):
@@ -78,6 +90,9 @@ class AgentRunner:
 
         final: AgentResponse | None = None
         intent_count = 0
+        # Per-run tool call dedup cache: cache_key -> ToolCallResult
+        tool_cache: dict[str, ToolCallResult] = {}
+        dedup_count = 0
         while True:
             line = await proc.stdout.readline()
             if not line:
@@ -102,7 +117,19 @@ class AgentRunner:
                     raise AgentRuntimeError(
                         f"Agent {agent_id} exceeded max intents ({self.max_intents})"
                     )
-                result = await tool_callback(parsed, agent_id)
+                # Dedup: return cached result for identical read-only tool calls
+                cache_key = _tool_cache_key(parsed)
+                if parsed.tool not in _SIDE_EFFECT_TOOLS and cache_key in tool_cache:
+                    result = tool_cache[cache_key]
+                    dedup_count += 1
+                    logger.info(
+                        "tool_call_deduplicated agent=%s tool=%s dedup_count=%d",
+                        agent_id, parsed.tool, dedup_count,
+                    )
+                else:
+                    result = await tool_callback(parsed, agent_id)
+                    if parsed.tool not in _SIDE_EFFECT_TOOLS:
+                        tool_cache[cache_key] = result
                 proc.stdin.write((result.model_dump_json() + "\n").encode("utf-8"))
                 await proc.stdin.drain()
                 continue

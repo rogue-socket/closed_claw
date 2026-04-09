@@ -432,14 +432,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 def _sync_registry_index(settings: Settings) -> None:
     """Run sync registry index."""
-    manifests: list[AgentManifest] = []
-    for path in settings.agents_dir.glob("*/manifest.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            manifests.append(AgentManifest.model_validate(data))
-        except Exception:
-            continue
-    AgentFactory.save_registry_index(settings.agents_dir / "registry.json", manifests)
+    AgentFactory.sync_registry_index(settings.agents_dir)
 
 
 def _migrate_legacy_agents(settings: Settings) -> None:

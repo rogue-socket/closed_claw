@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any
+
+logger = logging.getLogger("closed_claw.coordinator")
 
 from closed_claw.agents.factory import AgentFactory
 from closed_claw.config import Settings
 from closed_claw.embeddings.provider import EmbeddingProvider
+from closed_claw.evolution.fitness import evaluate_fitness
+from closed_claw.evolution.genome import Genome
+from closed_claw.evolution.mutation import mutate_genome
+from closed_claw.evolution.selection import select_ancestor_genome
 from closed_claw.observability.runlog import RunLogger
 from closed_claw.policy.approval import ApprovalGate, ApprovalRequest
 from closed_claw.policy.audit import AuditStore
 from closed_claw.registry.search import (
     RerankerProtocol,
+    classify_task_complexity,
     generate_agent_profile,
     generate_task_plan,
 )
@@ -112,14 +120,56 @@ class CoordinatorNodes:
 
     async def decompose_task(self, state: dict[str, Any]) -> dict[str, Any]:
         """Asynchronously run decompose task."""
+        task = state["task"]
+
+        # Classify task complexity to decide whether discovery is needed
+        try:
+            complexity = classify_task_complexity(self.settings, task)
+        except (ValueError, RuntimeError):
+            complexity = "complex"  # safe default
+
+        self._emit_runlog(state, "task_complexity_classified", {"complexity": complexity})
+
+        if complexity == "simple":
+            # Skip discovery — generate execution plan directly
+            plan = generate_task_plan(
+                self.settings,
+                task,
+                phase="execution",
+            )
+            execution_pool = self._prepare_phase_pool(plan, phase="execution")
+            merged = self._merge(
+                state,
+                task_complexity=complexity,
+                discovery_subtask_pool=[],
+                execution_subtask_pool=execution_pool,
+                discovery_results={},
+                execution_results={},
+                subtask_pool=execution_pool,
+            )
+            self._emit_runlog(
+                merged,
+                "task_plan_created",
+                {
+                    "phase": "execution",
+                    "complexity": "simple",
+                    "subtask_count": len(execution_pool),
+                    "subtasks": self._task_pool_snapshot(execution_pool),
+                },
+            )
+            self._emit_task_pool(merged, execution_pool, phase="execution")
+            return merged
+
+        # Complex task — generate discovery plan as before
         plan = generate_task_plan(
             self.settings,
-            state["task"],
+            task,
             phase="discovery",
         )
         discovery_pool = self._prepare_phase_pool(plan, phase="discovery")
         merged = self._merge(
             state,
+            task_complexity=complexity,
             discovery_subtask_pool=discovery_pool,
             execution_subtask_pool=[],
             discovery_results={},
@@ -131,167 +181,12 @@ class CoordinatorNodes:
             "task_plan_created",
             {
                 "phase": "discovery",
+                "complexity": "complex",
                 "subtask_count": len(discovery_pool),
                 "subtasks": self._task_pool_snapshot(discovery_pool),
             },
         )
         self._emit_task_pool(merged, discovery_pool, phase="discovery")
-        return merged
-
-    async def embed_task(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run embed task."""
-        out = self._merge(state, query_vector=self.embedder.embed(state["task"]))
-        self._emit_runlog(out, "task_embedded", {"embedding_dim": len(out["query_vector"])})
-        return out
-
-    async def semantic_search(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run semantic search."""
-        candidates = self.registry.semantic_search(state["query_vector"], k=5)
-        out = self._merge(
-            state,
-            candidates=[
-                {
-                    "agent_id": c.agent_id,
-                    "score": c.score,
-                    "reason": "semantic",
-                    "description": c.description,
-                }
-                for c in candidates
-            ],
-        )
-        self._emit_runlog(out, "semantic_search", {"candidate_count": len(out["candidates"])})
-        return out
-
-    async def llm_rerank(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run llm rerank."""
-        sem = state.get("candidates", [])
-        converted = [
-            SearchCandidate(
-                agent_id=c["agent_id"],
-                score=c["score"],
-                description=c.get("description", ""),
-            )
-            for c in sem
-        ]
-        ranked = self.reranker.rerank(state["task"], converted)
-        out = [{"agent_id": c.agent_id, "score": c.score, "reason": c.reason} for c in ranked]
-        low = (out[0]["score"] if out else 0.0) < self.settings.low_confidence_threshold
-        merged = self._merge(state, candidates=out, low_confidence=low)
-        self._emit_runlog(
-            merged,
-            "rerank_complete",
-            {"candidate_count": len(out), "low_confidence": low},
-        )
-        return merged
-
-    async def human_gate_if_low_confidence(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run human gate if low confidence."""
-        if not state.get("low_confidence", True):
-            return self._merge(state, human_create_approved=False)
-        if not self.settings.create_approval_required:
-            return self._merge(state, human_create_approved=True)
-
-        mode = (state.get("runtime_policies", {}) or {}).get(
-            "create_approval_mode", self.settings.create_approval_mode
-        )
-        decision = self.approval_gate.decide_create_with_mode(
-            mode=mode,
-            run_id=state["run_id"],
-            top_candidate=(state.get("candidates") or [{}])[0],
-        )
-        approved = decision.approved
-
-        self.audit.record_event(
-            "create_gate_decision",
-            {
-                "approved": approved,
-                "top_candidate": (state.get("candidates") or [{}])[0],
-                "threshold": self.settings.low_confidence_threshold,
-                "mode": mode,
-            },
-            run_id=state["run_id"],
-            agent_id=None,
-        )
-        self._emit_runlog(state, "create_gate_decision", {"approved": approved, "mode": mode})
-        return self._merge(state, human_create_approved=approved)
-
-    async def decide_reuse_or_create(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run decide reuse or create."""
-        candidates = state.get("candidates", [])
-        if not candidates:
-            return self._merge(state, decision="create")
-        top = candidates[0]
-        if state.get("low_confidence", True) and state.get("human_create_approved", False):
-            return self._merge(state, decision="create")
-        return self._merge(state, decision="reuse", selected_agent_id=top["agent_id"])
-
-    async def create_agent_if_needed(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run create agent if needed."""
-        if state["decision"] != "create":
-            return state
-        task = state["task"]
-        profile = self._select_capability_profile(task)
-        reusable_agent_id = self._find_reusable_capability_agent(profile)
-        if reusable_agent_id:
-            merged = self._merge(
-                state,
-                selected_agent_id=reusable_agent_id,
-                reused_capability_profile=profile["profile_id"],
-            )
-            self._emit_runlog(
-                merged,
-                "agent_reused_by_capability",
-                {
-                    "agent_id": reusable_agent_id,
-                    "profile_id": profile["profile_id"],
-                    "profile_name": profile["name_prefix"],
-                },
-            )
-            return merged
-
-        name = f"{profile['name_prefix']} {uuid.uuid4().hex[:4]}"
-        description = profile["description"]
-        tool_allowlist = profile["tools_allowlist"]
-        skill_content = profile["skill_md"]
-        manifest = self.factory.create_capsule(
-            name=name,
-            description=description,
-            embedding_model=self.settings.embedding_model,
-            embedding_vector=self.embedder.embed(description),
-            tools_allowlist=tool_allowlist,
-            tags=profile["tags"],
-            api_capabilities=profile.get("api_capabilities", []),
-            requires_approval_for=profile.get("requires_approval_for", []),
-            skill_content=skill_content,
-        )
-        self.registry.upsert_manifest(manifest)
-        self._sync_registry_index()
-        merged = self._merge(
-            state,
-            selected_agent_id=manifest.agent_id,
-            created_agent_description=manifest.description,
-            created_agent={
-                "agent_id": manifest.agent_id,
-                "name": manifest.name,
-                "description": manifest.description,
-                "profile_id": profile["profile_id"],
-                "tools_allowlist": manifest.tools_allowlist,
-                "skill_md": skill_content,
-            },
-        )
-        self._emit_runlog(
-            merged,
-            "agent_created",
-            {
-                "agent_id": manifest.agent_id,
-                "name": manifest.name,
-                "description": manifest.description,
-                "profile_id": profile["profile_id"],
-                "tools_allowlist": tool_allowlist,
-                "tags": profile["tags"],
-                "skill_md_preview": (skill_content or "")[:500],
-            },
-        )
         return merged
 
     async def execute_task_pool(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -587,7 +482,7 @@ class CoordinatorNodes:
                         {"phase": phase, "max_agents": max_agents, "task_id": item.get("task_id")},
                     )
                     break
-                agent_id, created = self._acquire_agent_for_role(role_tag, item)
+                agent_id, created = self._acquire_agent_for_role(role_tag, item, parent_task=state.get("task", ""))
                 role_agent_map[role_tag] = agent_id
                 if created:
                     agents_created_counter[0] += 1
@@ -603,6 +498,8 @@ class CoordinatorNodes:
                             "profile_id": created.get("profile_id", ""),
                             "tools_allowlist": created.get("tools_allowlist", []),
                             "skill_md_preview": (created.get("skill_md", "") or "")[:500],
+                            "genome_hash": created.get("genome_hash"),
+                            "generation": created.get("generation", 0),
                         },
                     )
                 else:
@@ -761,6 +658,29 @@ class CoordinatorNodes:
         if item["status"] not in {"completed", "failed", "cancelled"}:
             item["status"] = "failed"
             item["error"] = attempt_failures[-1] if attempt_failures else "subtask_failed"
+
+        # --- Evolution: evaluate fitness for the agent that ran this subtask ---
+        if self.settings.evolution_enabled and agent_id:
+            try:
+                agent_tool_events = [
+                    e for e in tool_events if e.get("agent_id") == agent_id
+                ]
+                fitness = evaluate_fitness(
+                    task_succeeded=(item["status"] == "completed"),
+                    tool_events=agent_tool_events,
+                    verification_passed=(item["status"] == "completed"),
+                    latency_ms=None,  # per-subtask latency not tracked; use aggregate later
+                )
+                score = fitness.aggregate()
+                # Exponential moving average: new_fitness = 0.6 * old + 0.4 * new
+                manifest = self.registry.get_manifest(agent_id)
+                if manifest is not None:
+                    old = manifest.fitness_score
+                    blended = 0.6 * old + 0.4 * score if old > 0 else score
+                    self.registry.update_fitness(agent_id, round(blended, 4))
+            except Exception:
+                logger.exception("fitness evaluation failed for agent %s", agent_id)
+
         self._emit_task_pool(state, pool, phase=phase)
 
     async def _execute_phase_pool(
@@ -894,26 +814,66 @@ class CoordinatorNodes:
 
     def _find_reusable_capability_agent(self, profile: dict[str, Any]) -> str | None:
         # Reuse by capability first to avoid creating niche one-off agents.
+        # Weight semantic similarity by agent success rate so failing agents
+        # are deprioritised. Skip degraded agents entirely.
         """Run find reusable capability agent."""
         query_vector = self.embedder.embed(profile["description"])
         candidates = self.registry.semantic_search(query_vector, k=10)
         profile_id = str(profile.get("profile_id", ""))
+
+        scored: list[tuple[float, str]] = []
         for cand in candidates:
             manifest = self.registry.get_manifest(cand.agent_id)
-            if manifest is None or manifest.status != "active":
+            if manifest is None or manifest.status not in ("active",):
                 continue
             tags = set(manifest.tags)
-            if profile_id in tags:
-                return manifest.agent_id
-        return None
+            if profile_id not in tags:
+                continue
+            # Neutral assumption for agents with < 2 runs
+            sr = manifest.success_rate if manifest.usage_count >= 2 else 0.5
+            effective_score = cand.score * (0.3 + 0.7 * sr)
+            scored.append((effective_score, manifest.agent_id))
+
+        if not scored:
+            return None
+        scored.sort(reverse=True)
+        return scored[0][1]
+
+    def _maybe_degrade_agents(self, state: dict[str, Any]) -> None:
+        """Mark agents with consistently poor performance as degraded."""
+        agent_ids = set(state.get("role_agent_map", {}).values())
+        agent_ids.add(state.get("selected_agent_id", ""))
+        for agent_id in agent_ids:
+            if not agent_id or agent_id == "unknown":
+                continue
+            manifest = self.registry.get_manifest(agent_id)
+            if manifest is None or manifest.status != "active":
+                continue
+            if manifest.usage_count >= 5 and manifest.success_rate < 0.2:
+                self.registry.update_agent_status(agent_id, "degraded")
+                self._emit_runlog(
+                    state,
+                    "agent_degraded",
+                    {
+                        "agent_id": agent_id,
+                        "usage_count": manifest.usage_count,
+                        "success_rate": manifest.success_rate,
+                    },
+                )
 
     def _acquire_agent_for_role(
         self,
         role_tag: str,
         subtask: dict[str, Any],
+        parent_task: str = "",
     ) -> tuple[str, dict[str, Any] | None]:
         """Run acquire agent for role."""
         role_prompt = (
+            f"Original user task: {parent_task}\n"
+            f"Role tag: {role_tag}. "
+            f"Subtask title: {subtask.get('title', '')}. "
+            f"Subtask description: {subtask.get('description', '')}"
+        ) if parent_task else (
             f"Role tag: {role_tag}. "
             f"Subtask title: {subtask.get('title', '')}. "
             f"Subtask description: {subtask.get('description', '')}"
@@ -925,6 +885,25 @@ class CoordinatorNodes:
         reusable_agent_id = self._find_reusable_capability_agent(profile)
         if reusable_agent_id:
             return reusable_agent_id, None
+
+        # --- Evolution: derive genome from best ancestor or create gen-0 ---
+        genome: Genome | None = None
+        lineage_dict: dict | None = None
+        if self.settings.evolution_enabled:
+            profile_id = str(profile.get("profile_id", ""))
+            ancestor = select_ancestor_genome(self.registry, profile_id) if profile_id else None
+            if ancestor is not None:
+                parent_genome, parent_gen = ancestor
+                child_genome, lineage = mutate_genome(
+                    parent_genome,
+                    mutation_rate=self.settings.evolution_mutation_rate,
+                )
+                lineage.generation = parent_gen + 1
+                genome = child_genome
+                lineage_dict = lineage.to_dict()
+            else:
+                genome = Genome.random(tools=profile["tools_allowlist"])
+                lineage_dict = {"parent_genome_hash": None, "generation": 0, "mutations_applied": []}
 
         name = f"{profile['name_prefix']} {uuid.uuid4().hex[:4]}"
         skill_content = profile["skill_md"]
@@ -939,6 +918,8 @@ class CoordinatorNodes:
             requires_approval_for=profile.get("requires_approval_for", []),
             skill_content=skill_content,
             skill_ids=profile.get("skill_ids", []),
+            genome=genome,
+            lineage_dict=lineage_dict,
         )
         self.registry.upsert_manifest(manifest)
         self._sync_registry_index()
@@ -950,6 +931,8 @@ class CoordinatorNodes:
             "tools_allowlist": manifest.tools_allowlist,
             "skill_md": skill_content,
             "role_tag": role_tag,
+            "genome_hash": genome.hash() if genome else None,
+            "generation": lineage_dict.get("generation", 0) if lineage_dict else 0,
         }
         return manifest.agent_id, created_agent
 
@@ -990,117 +973,6 @@ class CoordinatorNodes:
         cancel_path = self.settings.run_logs_dir / f"{run_id}.cancel"
         return cancel_path.exists()
 
-    async def dispatch_agents_async(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Asynchronously run dispatch agents async."""
-        selected = state["selected_agent_id"]
-        candidate_ids = [selected] + [
-            c["agent_id"]
-            for c in state.get("candidates", [])
-            if c["agent_id"] != selected
-        ]
-
-        for agent_id in candidate_ids:
-            manifest_path = self.settings.agents_dir / agent_id / "manifest.json"
-            entrypoint = self.settings.agents_dir / agent_id / "entrypoint.py"
-            if not manifest_path.exists() or not entrypoint.exists():
-                continue
-
-            req = CoordinatorRequest(
-                session_id=state["session_id"],
-                task=state["task"],
-                context=state.get("context", {}),
-                config=self._request_config_for_agent(agent_id),
-            )
-            composed_skill_ids = req.config.get("skill_ids", [])
-            if composed_skill_ids:
-                self._emit_runlog(
-                    state,
-                    "skills_composed",
-                    {
-                        "agent_id": agent_id,
-                        "skill_ids": composed_skill_ids,
-                    },
-                )
-            approvals = list(state.get("approvals", []))
-            tool_events = list(state.get("tool_events", []))
-            api_mode = (state.get("runtime_policies", {}) or {}).get(
-                "api_approval_mode", self.settings.api_approval_mode
-            )
-            try:
-                response = await self.runner.run_agent(
-                    agent_id=agent_id,
-                    entrypoint=entrypoint,
-                    request=req,
-                    approval_callback=lambda intent, a_id: self._approval_callback(
-                        intent=intent,
-                        agent_id=a_id,
-                        run_id=state["run_id"],
-                        approvals=approvals,
-                        mode=api_mode,
-                    ),
-                    tool_callback=lambda intent, a_id: self._tool_callback(
-                        intent=intent,
-                        agent_id=a_id,
-                        run_id=state["run_id"],
-                        tool_events=tool_events,
-                    ),
-                )
-                merged = self._merge(
-                    state,
-                    selected_agent_id=agent_id,
-                    response_status=response.status,
-                    response_result=response.result,
-                    response_error=response.error_message or "",
-                    response_latency_ms=response.metrics.latency_ms or 0.0,
-                    memory_updates=response.memory_updates,
-                    artifacts=response.artifacts,
-                    approvals=approvals,
-                    tool_events=tool_events,
-                )
-                self._emit_runlog(
-                    merged,
-                    "agent_run_complete",
-                    {
-                        "agent_id": agent_id,
-                        "status": response.status,
-                        "result": (response.result or "")[:2000],
-                        "error": response.error_message or "",
-                        "approvals": len(approvals),
-                        "tool_calls": len(tool_events),
-                        "tool_summary": [
-                            {"tool": evt.get("tool"), "ok": evt.get("ok"), "reason": evt.get("reason", "")}
-                            for evt in tool_events[-10:]
-                        ],
-                        "memory_updates": (response.memory_updates or [])[:5],
-                        "artifacts": (response.artifacts or [])[:5],
-                        "latency_ms": response.metrics.latency_ms if response.metrics else 0.0,
-                    },
-                )
-                return merged
-            except AgentRuntimeError as exc:
-                failed = list(state.get("failed_agents", []))
-                failed.append(agent_id)
-                state["failed_agents"] = failed
-                self.audit.record_event(
-                    "agent_run_failure",
-                    {"agent_id": agent_id, "error": str(exc)},
-                    run_id=state["run_id"],
-                    agent_id=agent_id,
-                )
-                self._emit_runlog(state, "agent_run_failure", {"agent_id": agent_id, "error": str(exc)})
-
-        merged = self._merge(
-            state,
-            response_status="error",
-            response_result="",
-            response_error="All candidate agents failed",
-            response_latency_ms=0.0,
-            memory_updates=[],
-            artifacts=[],
-        )
-        self._emit_runlog(merged, "all_candidates_failed", {"failed_agents": merged.get("failed_agents", [])})
-        return merged
-
     async def validate_outputs(self, state: dict[str, Any]) -> dict[str, Any]:
         """Asynchronously run validate outputs."""
         if state.get("response_status") not in {"ok", "error"}:
@@ -1110,50 +982,6 @@ class CoordinatorNodes:
                 response_error="invalid_agent_response",
             )
         return state
-
-    async def approval_gate_for_api_calls(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Evaluate pending api_call_intents that have not yet been decided.
-
-        This node is wired into the graph *before* agent dispatch; it pre-screens
-        any api-call intents the coordinator has accumulated so far so that the
-        ``continue_or_deny_api_path`` edge can route accordingly.
-        """
-        pending = state.get("pending_api_intents", [])
-        if not pending:
-            return self._merge(state, api_calls_approved=True)
-
-        mode = (state.get("runtime_policies", {}) or {}).get(
-            "api_approval_mode", self.settings.api_approval_mode
-        )
-        denied: list[dict[str, Any]] = []
-        for intent_data in pending:
-            req = ApprovalRequest(
-                call_type=intent_data.get("call_type", "external_paid_api"),
-                provider=intent_data.get("provider", ""),
-                endpoint=intent_data.get("endpoint", ""),
-                estimated_cost_usd=float(intent_data.get("estimated_cost_usd", 0)),
-                reason=intent_data.get("reason", ""),
-                session_id=state["run_id"],
-            )
-            decision = self.approval_gate.decide_with_mode(req=req, mode=mode)
-            self.audit.record_approval(req, decision, run_id=state["run_id"], agent_id=None)
-            if not decision.approved:
-                denied.append({"provider": req.provider, "note": decision.note})
-        all_ok = len(denied) == 0
-        self._emit_runlog(state, "api_gate_decision", {"approved": all_ok, "denied": denied})
-        return self._merge(state, api_calls_approved=all_ok, denied_api_calls=denied)
-
-    async def continue_or_deny_api_path(self, state: dict[str, Any]) -> dict[str, Any]:
-        """If any API call was denied, mark the run as soft-failed and explain."""
-        if state.get("api_calls_approved", True):
-            return state
-        denied = state.get("denied_api_calls", [])
-        reason = "; ".join(d.get("note", "denied") for d in denied) or "api_calls_denied"
-        return self._merge(
-            state,
-            response_status="error",
-            response_error=f"api_calls_denied: {reason}",
-        )
 
     async def update_registry_and_audit(self, state: dict[str, Any]) -> dict[str, Any]:
         """Asynchronously run update registry and audit."""
@@ -1165,6 +993,8 @@ class CoordinatorNodes:
             latency_ms=state.get("response_latency_ms"),
             error_message=state.get("response_error"),
         )
+        # Auto-degrade agents with consistently poor performance
+        self._maybe_degrade_agents(state)
         self.audit.record_event(
             "run_summary",
             {
@@ -1231,10 +1061,10 @@ class CoordinatorNodes:
 
         # Attempt LLM synthesis to turn raw subtask outputs into a clean answer.
         try:
-            from closed_claw.registry.search import _generate_text_with_provider, _provider_key_and_base
+            from closed_claw.llm_client import generate_text, provider_key_and_base
 
             provider = self.settings.llm_provider.lower()
-            key, base = _provider_key_and_base(self.settings, provider)
+            key, base = provider_key_and_base(self.settings, provider)
             if key and provider not in ("heuristic",):
 
                 prompt = (
@@ -1245,7 +1075,7 @@ class CoordinatorNodes:
                     "Include concrete results, files created/modified, and any caveats. "
                     "Plain text only, no JSON."
                 )
-                synthesized = _generate_text_with_provider(
+                synthesized = generate_text(
                     provider=provider,
                     model=self.settings.llm_model,
                     api_key=key,
@@ -1262,8 +1092,7 @@ class CoordinatorNodes:
                     })
                     return self._merge(state, response_result=synthesized.strip())
         except Exception:
-            # LLM synthesis is best-effort; fall back to raw result.
-            pass
+            logger.exception("LLM synthesis failed, falling back to raw result")
 
         # Ensure we always return something meaningful even without LLM
         final_result = raw_result or pool_summary or "Task completed but no detailed output was captured."
@@ -1272,66 +1101,6 @@ class CoordinatorNodes:
             "raw_result_preview": (final_result or "")[:1500],
         })
         return self._merge(state, response_result=final_result)
-
-    async def failure_recovery(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Attempt to recover from a failed run by asking the LLM for a diagnosis.
-
-        If recovery is not possible the error state is preserved as-is so
-        ``synthesize_final_response`` can produce a useful error message.
-        """
-        if state.get("response_status") != "error":
-            return state
-
-        failed_agents = state.get("failed_agents", [])
-        error = state.get("response_error", "unknown")
-
-        # Record the failure for circuit-breaker / audit purposes.
-        self.audit.record_event(
-            "failure_recovery_attempted",
-            {"error": error, "failed_agents": failed_agents},
-            run_id=state["run_id"],
-            agent_id=state.get("selected_agent_id"),
-        )
-        self._emit_runlog(
-            state,
-            "failure_recovery",
-            {"error": error, "failed_agents": failed_agents},
-        )
-
-        # Ask the LLM for a brief diagnosis to aid debugging.
-        try:
-            from closed_claw.registry.search import _generate_text_with_provider, _provider_key_and_base
-
-            provider = self.settings.llm_provider.lower()
-            key, base = _provider_key_and_base(self.settings, provider)
-            if key and provider not in ("heuristic",):
-                prompt = (
-                    "A multi-agent task run has failed.\n"
-                    f"Task: {state.get('task', '')}\n"
-                    f"Error: {error}\n"
-                    f"Failed agents: {json.dumps(failed_agents)}\n\n"
-                    "Write a brief diagnosis (2-3 sentences) explaining the most likely "
-                    "root cause and a concrete suggestion for recovery. Plain text only."
-                )
-                diagnosis = _generate_text_with_provider(
-                    provider=provider,
-                    model=self.settings.llm_model,
-                    api_key=key,
-                    base_url=base,
-                    timeout_sec=self.settings.llm_timeout_sec,
-                    prompt=prompt,
-                    max_tokens=200,
-                    temperature=0.1,
-                )
-                if diagnosis and diagnosis.strip():
-                    return self._merge(
-                        state,
-                        response_error=f"{error} | LLM diagnosis: {diagnosis.strip()}",
-                    )
-        except Exception:
-            pass
-
-        return state
 
     async def _approval_callback(
         self,
@@ -1395,12 +1164,11 @@ class CoordinatorNodes:
         )
         human_decision = self.approval_gate.decide_with_mode(req=req, mode=mode)
         self.audit.record_approval(req, human_decision, run_id=run_id, agent_id=agent_id)
-        if not human_decision.approved:
-            self.registry.open_circuit_if_needed(
-                provider=intent.provider,
-                threshold=self.settings.circuit_breaker_failures,
-            )
-        else:
+
+        # Circuit breaker only tracks *technical* provider failures.
+        # Policy denials (human says "no") should NOT open the circuit.
+        # Only reset the circuit on a successful approval (provider reachable).
+        if human_decision.approved:
             self.registry.reset_circuit(intent.provider)
 
         approvals.append(
@@ -1510,18 +1278,12 @@ class CoordinatorNodes:
 
     def _sync_registry_index(self) -> None:
         """Run sync registry index."""
-        manifests: list[AgentManifest] = []
-        for path in self.settings.agents_dir.glob("*/manifest.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                manifests.append(AgentManifest.model_validate(data))
-            except Exception:
-                continue
-        AgentFactory.save_registry_index(self.settings.agents_dir / "registry.json", manifests)
+        AgentFactory.sync_registry_index(self.settings.agents_dir)
 
     def _compose_system_prompt(self, agent_id: str, manifest: Any | None) -> str:
-        """Build the agent system prompt by composing base skill modules + role overlay.
+        """Build the agent system prompt by composing layers.
 
+        Layer 0 — Soul (soul.md): shared personality, philosophy, and ground rules.
         Layer 1 — Base skill modules from agents/skills/<skill_id>.md (shared library).
         Layer 2 — Agent role overlay from agents/<agent_id>/skill.md (identity + rules).
 
@@ -1531,6 +1293,13 @@ class CoordinatorNodes:
         overlay is used. Existing agents with no skill_ids degrade gracefully.
         """
         parts: list[str] = []
+
+        # Layer 0: soul — shared identity and philosophy across all agents
+        soul_path = self.settings.soul_md_path
+        if soul_path and soul_path.exists():
+            soul_content = soul_path.read_text(encoding="utf-8").strip()
+            if soul_content:
+                parts.append(soul_content)
 
         # Layer 1: load requested base skill modules from the shared skill library
         if manifest is not None:
@@ -1566,16 +1335,31 @@ class CoordinatorNodes:
         allowlist = manifest.tools_allowlist if manifest else []
         skill_ids = getattr(manifest, "skill_ids", []) or [] if manifest else []
         system_prompt = self._compose_system_prompt(agent_id, manifest)
+
+        # Derive genome-specific overrides
+        agent_loop_max_steps = min(12, self.settings.max_tool_calls_per_agent)
+        llm_config = self._llm_runtime_config()
+        if manifest and self.settings.evolution_enabled:
+            genome_raw = getattr(manifest, "genome_json", "{}") or "{}"
+            try:
+                genome_dict = json.loads(genome_raw) if isinstance(genome_raw, str) else {}
+            except (json.JSONDecodeError, TypeError):
+                genome_dict = {}
+            if genome_dict:
+                genome = Genome.from_dict(genome_dict)
+                agent_loop_max_steps = min(genome.max_iterations, self.settings.max_tool_calls_per_agent)
+                llm_config["temperature"] = genome.temperature
+
         return {
             "timeout_s": self.settings.agent_timeout_sec,
-            "agent_loop_max_steps": min(12, self.settings.max_tool_calls_per_agent),
+            "agent_loop_max_steps": agent_loop_max_steps,
             "agent_loop_llm_retries": 2,
             "agent_loop_max_consecutive_errors": 4,
             "max_tool_calls_per_agent": self.settings.max_tool_calls_per_agent,
             "tool_registry": tool_registry_for_allowlist(allowlist),
             "system_prompt": system_prompt,
             "skill_ids": skill_ids,
-            "llm": self._llm_runtime_config(),
+            "llm": llm_config,
         }
 
     def _llm_runtime_config(self) -> dict[str, Any]:

@@ -286,7 +286,7 @@ class RegistryStore:
                     SELECT v.agent_id AS agent_id, distance, a.description
                     FROM agent_vectors v
                     JOIN agents a ON a.agent_id = v.agent_id
-                    WHERE v.embedding MATCH ? AND k = ?
+                    WHERE v.embedding MATCH ? AND k = ? AND a.status = 'active'
                     ORDER BY distance ASC
                     """,
                     (vector, k),
@@ -332,43 +332,53 @@ class RegistryStore:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO runs (run_id, agent_id, task, status, latency_ms, error_message)
+                INSERT INTO runs (run_id, agent_id, task, status, latency_ms, error_message)
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    task = excluded.task,
+                    status = excluded.status,
+                    latency_ms = excluded.latency_ms,
+                    error_message = excluded.error_message
                 """,
                 (run_id, agent_id, task, status, latency_ms, error_message),
             )
-            row = conn.execute(
-                "SELECT usage_count, success_count, failure_count, avg_latency_ms FROM agents WHERE agent_id = ?",
-                (agent_id,),
-            ).fetchone()
-            if row is None:
-                return
-            usage_count = int(row["usage_count"]) + 1
-            success_count = int(row["success_count"]) + (1 if status == "ok" else 0)
-            failure_count = int(row["failure_count"]) + (1 if status != "ok" else 0)
-            success_rate = success_count / usage_count if usage_count else 0.0
-            prev_latency = row["avg_latency_ms"]
-            if latency_ms is not None and prev_latency is not None:
-                avg_latency = (float(prev_latency) * (usage_count - 1) + latency_ms) / usage_count
+            now = datetime.now(UTC).isoformat()
+            if latency_ms is not None:
+                conn.execute(
+                    """
+                    UPDATE agents
+                    SET usage_count = usage_count + 1,
+                        success_count = success_count + CASE WHEN ? = 'ok' THEN 1 ELSE 0 END,
+                        failure_count = failure_count + CASE WHEN ? != 'ok' THEN 1 ELSE 0 END,
+                        success_rate = CAST(
+                            success_count + CASE WHEN ? = 'ok' THEN 1 ELSE 0 END AS REAL
+                        ) / (usage_count + 1),
+                        avg_latency_ms = CASE
+                            WHEN avg_latency_ms IS NOT NULL
+                            THEN (avg_latency_ms * usage_count + ?) / (usage_count + 1)
+                            ELSE ?
+                        END,
+                        last_used_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (status, status, status, latency_ms, latency_ms, now, agent_id),
+                )
             else:
-                avg_latency = latency_ms if latency_ms is not None else prev_latency
-            conn.execute(
-                """
-                UPDATE agents
-                SET usage_count = ?, success_count = ?, failure_count = ?,
-                    success_rate = ?, avg_latency_ms = ?, last_used_at = ?
-                WHERE agent_id = ?
-                """,
-                (
-                    usage_count,
-                    success_count,
-                    failure_count,
-                    success_rate,
-                    avg_latency,
-                    datetime.now(UTC).isoformat(),
-                    agent_id,
-                ),
-            )
+                conn.execute(
+                    """
+                    UPDATE agents
+                    SET usage_count = usage_count + 1,
+                        success_count = success_count + CASE WHEN ? = 'ok' THEN 1 ELSE 0 END,
+                        failure_count = failure_count + CASE WHEN ? != 'ok' THEN 1 ELSE 0 END,
+                        success_rate = CAST(
+                            success_count + CASE WHEN ? = 'ok' THEN 1 ELSE 0 END AS REAL
+                        ) / (usage_count + 1),
+                        last_used_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (status, status, status, now, agent_id),
+                )
 
     def open_circuit_if_needed(self, provider: str, threshold: int) -> bool:
         """Run open circuit if needed."""
@@ -501,7 +511,14 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Run cosine similarity."""
     if not a or not b:
         return 0.0
-    n = min(len(a), len(b))
+    if len(a) != len(b):
+        import logging
+        logging.getLogger("closed_claw.registry").warning(
+            "cosine_similarity: dimension mismatch (%d vs %d), returning 0.0",
+            len(a), len(b),
+        )
+        return 0.0
+    n = len(a)
     dot = sum(a[i] * b[i] for i in range(n))
     norm_a = math.sqrt(sum(a[i] * a[i] for i in range(n)))
     norm_b = math.sqrt(sum(b[i] * b[i] for i in range(n)))

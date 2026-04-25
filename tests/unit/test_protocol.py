@@ -35,3 +35,48 @@ def test_parse_tool_intent():
     parsed = parse_agent_line(line)
     assert isinstance(parsed, ToolCallIntent)
     assert parsed.tool == "terminal"
+
+
+def test_parse_empty_line():
+    """parse_agent_line raises ValueError on empty input."""
+    with pytest.raises(ValueError, match="empty agent output"):
+        parse_agent_line("")
+    with pytest.raises(ValueError, match="empty agent output"):
+        parse_agent_line("   \n")
+
+
+def test_parse_without_type_field_agent_response():
+    """Backward compat: AgentResponse without explicit type field still parses via fallback."""
+    line = '{"status":"ok","result":"done","memory_updates":[],"artifacts":[],"metrics":{"latency_ms":1.0}}'
+    parsed = parse_agent_line(line)
+    assert isinstance(parsed, AgentResponse)
+    assert parsed.result == "done"
+
+
+def test_parse_malformed_json():
+    """Completely broken JSON raises ValueError."""
+    with pytest.raises(ValueError):
+        parse_agent_line("{invalid json!!}")
+
+
+def test_coordinator_request_defaults():
+    """CoordinatorRequest fills defaults for optional fields."""
+    from closed_claw.runtime.protocol import CoordinatorRequest
+    req = CoordinatorRequest(session_id="s1", task="do something")
+    assert req.context == {}
+    assert req.artifacts == []
+    assert req.config == {}
+
+
+def test_coordinator_request_roundtrip():
+    """CoordinatorRequest survives JSON serialization round-trip."""
+    from closed_claw.runtime.protocol import CoordinatorRequest
+    req = CoordinatorRequest(
+        session_id="s1",
+        task="test task",
+        config={"llm": {"provider": "openai"}},
+    )
+    json_str = req.model_dump_json()
+    restored = CoordinatorRequest.model_validate_json(json_str)
+    assert restored.session_id == "s1"
+    assert restored.config["llm"]["provider"] == "openai"

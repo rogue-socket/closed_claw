@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from closed_claw.tools.executor import SUPPORTED_TOOLS, ToolExecutionError, ToolExecutor
+import pytest
+
+from closed_claw.tools.executor import (
+    SUPPORTED_TOOLS,
+    ToolExecutionError,
+    ToolExecutor,
+    tool_registry_for_allowlist,
+)
 
 
 def test_terminal_tool(tmp_path: Path):
@@ -127,3 +136,142 @@ def test_python_exec_no_warning_for_normal_code(tmp_path: Path):
     assert out["returncode"] == 0
     assert "WARNING" not in out["stderr"]
     assert "hello world" in out["stdout"]
+
+
+# ── http_api tests ───────────────────────────────────────────────────────────
+
+
+def test_http_api_success(tmp_path: Path):
+    """http_api returns status_code, headers, and text from a mocked response."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_resp.text = '{"ok": true}'
+    mock_client = MagicMock()
+    mock_client.__enter__ = lambda self: mock_client
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.request.return_value = mock_resp
+    with patch("httpx.Client", return_value=mock_client):
+        out = executor.execute("http_api", {"url": "https://example.com/api", "method": "POST"}, allowlist=["http_api"])
+    assert out["status_code"] == 200
+    assert "content-type" in out["headers"]
+    assert "ok" in out["text"]
+
+
+def test_http_api_missing_url(tmp_path: Path):
+    """http_api raises ToolExecutionError when url is missing."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="http_api requires 'url'"):
+        executor.execute("http_api", {"method": "GET"}, allowlist=["http_api"])
+
+
+# ── web_fetch tests ──────────────────────────────────────────────────────────
+
+
+def test_web_fetch_success(tmp_path: Path):
+    """web_fetch returns status_code and text from a mocked response."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = "<html>hello</html>"
+    mock_client = MagicMock()
+    mock_client.__enter__ = lambda self: mock_client
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get.return_value = mock_resp
+    with patch("httpx.Client", return_value=mock_client):
+        out = executor.execute("web_fetch", {"url": "https://example.com"}, allowlist=["web_fetch"])
+    assert out["status_code"] == 200
+    assert "hello" in out["text"]
+
+
+def test_web_fetch_missing_url(tmp_path: Path):
+    """web_fetch raises ToolExecutionError when url is missing."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="web_fetch requires 'url'"):
+        executor.execute("web_fetch", {}, allowlist=["web_fetch"])
+
+
+# ── sql_query tests ──────────────────────────────────────────────────────────
+
+
+def test_sql_query_select_enforcement(tmp_path: Path):
+    """sql_query rejects non-SELECT statements."""
+    db_path = tmp_path / "test.db"
+    sqlite3.connect(db_path).close()
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="sql_query only allows SELECT"):
+        executor.execute("sql_query", {"db_path": str(db_path), "query": "DELETE FROM x"}, allowlist=["sql_query"])
+
+
+def test_sql_query_success(tmp_path: Path):
+    """sql_query returns rows from a real SQLite database."""
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO items VALUES (1, 'alpha')")
+    conn.execute("INSERT INTO items VALUES (2, 'beta')")
+    conn.commit()
+    conn.close()
+    executor = ToolExecutor(workspace_root=tmp_path)
+    out = executor.execute("sql_query", {"db_path": str(db_path), "query": "SELECT * FROM items"}, allowlist=["sql_query"])
+    assert len(out["rows"]) == 2
+    assert out["rows"][0]["name"] == "alpha"
+
+
+# ── safe_path tests ──────────────────────────────────────────────────────────
+
+
+def test_safe_path_traversal_blocked(tmp_path: Path):
+    """_safe_path blocks path traversal attempts."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="file path escapes workspace"):
+        executor._safe_path("../../etc/passwd")
+
+
+def test_safe_path_absolute_outside_workspace(tmp_path: Path):
+    """_safe_path blocks absolute paths outside workspace."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="file path escapes workspace"):
+        executor._safe_path("/etc/passwd")
+
+
+def test_safe_path_within_workspace(tmp_path: Path):
+    """_safe_path resolves relative paths within workspace correctly."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    result = executor._safe_path("subdir/file.txt")
+    assert result == (tmp_path / "subdir" / "file.txt").resolve()
+
+
+# ── tool_registry_for_allowlist tests ────────────────────────────────────────
+
+
+def test_tool_registry_for_allowlist_filters():
+    """tool_registry_for_allowlist returns only allowed tools."""
+    result = tool_registry_for_allowlist(["terminal", "file_io"])
+    names = [t["name"] for t in result]
+    assert names == ["terminal", "file_io"]
+
+
+def test_tool_registry_for_allowlist_unknown():
+    """tool_registry_for_allowlist skips unknown tool names."""
+    result = tool_registry_for_allowlist(["nonexistent"])
+    assert result == []
+
+
+# ── misc edge cases ──────────────────────────────────────────────────────────
+
+
+def test_unknown_tool_dispatch(tmp_path: Path):
+    """Dispatching an unknown tool raises ToolExecutionError."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    # Tool must be in allowlist to reach the dispatch; use a name not in TOOL_REGISTRY
+    with pytest.raises(ToolExecutionError, match="unknown tool"):
+        executor.execute("nonexistent_tool", {}, allowlist=["nonexistent_tool"])
+
+
+def test_terminal_empty_cmd(tmp_path: Path):
+    """Terminal tool with empty cmd raises ToolExecutionError."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    with pytest.raises(ToolExecutionError, match="terminal requires non-empty"):
+        executor.execute("terminal", {"cmd": ""}, allowlist=["terminal"])

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import closed_claw
 from closed_claw.agents.factory import ENTRYPOINT_TEMPLATE
 
 
@@ -25,15 +27,21 @@ def test_generated_entrypoint_requires_llm_for_tool_reasoning(tmp_path: Path):
         },
     }
 
+    # The shim's walk-up won't find the package from tmp_path; pass the
+    # project root explicitly via PYTHONPATH so the shim's import resolves.
+    project_root = Path(closed_claw.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(project_root)}
+
     proc = subprocess.run(
         [sys.executable, str(entrypoint)],
         input=json.dumps(request) + "\n",
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
-    assert proc.returncode == 0
+    assert proc.returncode == 0, proc.stderr
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     payloads = [json.loads(line) for line in lines]
     final = payloads[-1]

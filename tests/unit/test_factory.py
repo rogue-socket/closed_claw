@@ -98,8 +98,10 @@ def test_agent_id_generation(tmp_path: Path):
 
 
 def test_entrypoint_version_tag(tmp_path: Path):
-    """Generated entrypoint.py contains the correct version tag (13)."""
+    """Generated entrypoint.py contains the current version tag."""
     _, manifest = _create_test_capsule(tmp_path)
     capsule_dir = tmp_path / "agents" / manifest.agent_id
     content = (capsule_dir / "entrypoint.py").read_text(encoding="utf-8")
-    assert "CLOSED_CLAW_ENTRYPOINT_VERSION=13" in content
+    assert "CLOSED_CLAW_ENTRYPOINT_VERSION=14" in content
+    # Shim delegates to the shared runtime module.
+    assert "from closed_claw.runtime.agent_loop import main" in content

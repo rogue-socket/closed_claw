@@ -200,17 +200,19 @@ class CoordinatorNodes:
         created_agents: list[dict[str, Any]] = list(state.get("created_agents", []))
         subtask_results: dict[str, str] = dict(state.get("subtask_results", {}))
         legacy_pool = [dict(item) for item in state.get("subtask_pool", [])]
-        has_discovery_pool = bool(state.get("discovery_subtask_pool", []))
-        has_execution_pool = bool(state.get("execution_subtask_pool", []))
-        legacy_execution_only = bool(legacy_pool) and not has_discovery_pool and not has_execution_pool
 
-        if legacy_execution_only:
-            for item in legacy_pool:
+        if self._should_skip_discovery(state):
+            # Use the explicit execution pool when present (simple-classified
+            # path); fall back to the legacy single-pool shape.
+            execution_only_pool = [
+                dict(item) for item in state.get("execution_subtask_pool", [])
+            ] or legacy_pool
+            for item in execution_only_pool:
                 item.setdefault("phase", "execution")
             execution_phase = await self._execute_phase_pool(
                 state=state,
                 phase="execution",
-                pool=legacy_pool,
+                pool=execution_only_pool,
                 discovery_results=dict(state.get("discovery_results", {})),
                 approvals=approvals,
                 tool_events=tool_events,
@@ -454,7 +456,12 @@ class CoordinatorNodes:
             if dep in by_id
         }
         criteria = item.get("acceptance_criteria", [])
+        workspace = str(self.tool_executor.workspace_root)
         task_payload = (
+            f"Workspace root: {workspace}\n"
+            f"`$WORKSPACE` and `${{WORKSPACE}}` resolve to this path. "
+            f"When you need a file path, substitute the actual path above "
+            f"rather than passing the literal token `$WORKSPACE`.\n\n"
             f"{item.get('description', '')}\n\n"
             "Acceptance criteria:\n"
             + "\n".join(f"- {c}" for c in criteria)
@@ -462,6 +469,7 @@ class CoordinatorNodes:
         max_attempts = max(1, int(self.settings.subtask_max_attempts))
         attempt_failures: list[str] = []
         item["attempts"] = 0
+        agent_id: str | None = None
 
         for attempt_idx in range(1, max_attempts + 1):
             item["attempts"] = attempt_idx
@@ -604,7 +612,13 @@ class CoordinatorNodes:
                             item=item,
                             new_tool_events=new_events,
                         )
+                        content_ok, content_reason = (True, "")
                         if verification_ok:
+                            content_ok, content_reason = self._verify_acceptance_criteria(
+                                item=item,
+                                response_result=response.result or "",
+                            )
+                        if verification_ok and content_ok:
                             item["status"] = "completed"
                             item["error"] = ""
                             item["result"] = response.result
@@ -628,7 +642,10 @@ class CoordinatorNodes:
                             tool_events.extend(attempt_tool_events)
                             approvals.extend(attempt_approvals)
                             break
-                        failure_reason = verification_msg or "filesystem_verification_failed"
+                        if not verification_ok:
+                            failure_reason = verification_msg or "filesystem_verification_failed"
+                        else:
+                            failure_reason = content_reason or "acceptance_criteria_not_met"
                 else:
                     failure_reason = response.error_message or "subtask_failed"
             except AgentRuntimeError as exc:
@@ -813,21 +830,31 @@ class CoordinatorNodes:
         )
 
     def _find_reusable_capability_agent(self, profile: dict[str, Any]) -> str | None:
-        # Reuse by capability first to avoid creating niche one-off agents.
-        # Weight semantic similarity by agent success rate so failing agents
-        # are deprioritised. Skip degraded agents entirely.
+        # Reuse by capability: semantic similarity is primary, role/tool overlap
+        # is a sanity filter. Weight by success rate so failing agents fall back.
         """Run find reusable capability agent."""
         query_vector = self.embedder.embed(profile["description"])
         candidates = self.registry.semantic_search(query_vector, k=10)
-        profile_id = str(profile.get("profile_id", ""))
+        threshold = self.settings.low_confidence_threshold
+        # Tags every auto-created capsule shares; not useful for matching.
+        noise_tags = {"auto", "capability"}
+        profile_tags = set(profile.get("tags", [])) - noise_tags
+        required_tools = set(profile.get("tools_allowlist", []))
 
         scored: list[tuple[float, str]] = []
         for cand in candidates:
+            if cand.score < threshold:
+                continue
             manifest = self.registry.get_manifest(cand.agent_id)
             if manifest is None or manifest.status not in ("active",):
                 continue
-            tags = set(manifest.tags)
-            if profile_id not in tags:
+            cand_tags = set(manifest.tags) - noise_tags
+            # Role-overlap filter: skipped only if the new profile has no
+            # meaningful tags to match on (otherwise we'd never reuse).
+            if profile_tags and not (profile_tags & cand_tags):
+                continue
+            # Tool-shape filter: candidate must have every tool the new role asks for.
+            if required_tools and not required_tools.issubset(set(manifest.tools_allowlist)):
                 continue
             # Neutral assumption for agents with < 2 runs
             sr = manifest.success_rate if manifest.usage_count >= 2 else 0.5
@@ -1386,6 +1413,72 @@ class CoordinatorNodes:
             "base_url": base_url,
             "timeout_s": self.settings.llm_timeout_sec,
         }
+
+    @staticmethod
+    def _should_skip_discovery(state: dict[str, Any]) -> bool:
+        """Decide whether ``execute_task_pool`` should skip the discovery phase.
+
+        Skip when the caller already produced an execution pool (the
+        ``simple`` complexity branch in ``decompose_task``) or when only the
+        legacy single ``subtask_pool`` is present.
+        """
+        has_discovery = bool(state.get("discovery_subtask_pool"))
+        has_execution = bool(state.get("execution_subtask_pool"))
+        has_legacy = bool(state.get("subtask_pool"))
+        if has_discovery:
+            return False
+        if has_execution:
+            return True
+        if has_legacy:
+            return True
+        return False
+
+    @staticmethod
+    def _verify_acceptance_criteria(
+        item: dict[str, Any],
+        response_result: str,
+    ) -> tuple[bool, str]:
+        """Lightweight content check against a subtask's acceptance_criteria.
+
+        Catches:
+        - Self-classification failure phrases ("task could not be completed",
+          "unable to complete", "cannot complete") in the agent's result text.
+          The agent has a protocol path to emit ``status="error"`` directly;
+          this is a safety net for when it emits status="ok" but the text is
+          plainly a giving-up message.
+        - An "absolute path" criterion satisfied by an unresolved ``$HOME`` or
+          ``~`` literal.
+        Returns ``(ok, reason)``.
+        """
+        text_lower = response_result.lower() if response_result else ""
+        # Self-reported failure phrases — anchored to "the task / this request"
+        # to avoid flagging legitimate uses of "could not" (e.g. "could not find
+        # any matching rows, so the count is 0", which is a valid success).
+        failure_phrases = (
+            "could not be completed",
+            "unable to complete the task",
+            "unable to complete this task",
+            "cannot complete the task",
+            "cannot complete this task",
+            "could not complete the task",
+            "task cannot be completed",
+            "task could not be completed",
+        )
+        if any(phrase in text_lower for phrase in failure_phrases):
+            return False, "agent_self_reported_failure_in_result_text"
+
+        criteria = item.get("acceptance_criteria", []) or []
+        if not criteria:
+            return True, ""
+        wants_absolute_path = any(
+            "absolute path" in str(c).lower() for c in criteria
+        )
+        if wants_absolute_path:
+            if "$HOME" in response_result or "~/" in response_result:
+                return False, "unresolved_env_var_in_absolute_path"
+            if "/" not in response_result:
+                return False, "no_absolute_path_in_result"
+        return True, ""
 
     @staticmethod
     def _verify_subtask_tool_execution(

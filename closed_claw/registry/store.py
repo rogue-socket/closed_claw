@@ -136,13 +136,32 @@ class RegistryStore:
         schema = schema.replace("float[384]", f"float[{self.embedding_dim}]")
         if not self.require_sqlite_vec:
             schema = re.sub(
-                r"CREATE VIRTUAL TABLE IF NOT EXISTS agent_vectors USING vec0\(\s*agent_id TEXT,\s*embedding float\[\d+\]\s*\);\n?",
+                r"CREATE VIRTUAL TABLE IF NOT EXISTS agent_vectors USING vec0\([^)]*\);\n?",
                 "",
                 schema,
                 flags=re.MULTILINE,
             )
         with self._conn() as conn:
+            # Migration: pre-cosine vec0 table needs to be rebuilt with
+            # distance_metric=cosine. Detect by inspecting the stored CREATE SQL.
+            if self.sqlite_vec_available:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_vectors'"
+                ).fetchone()
+                if row and "distance_metric" not in (row["sql"] or ""):
+                    conn.execute("DROP TABLE agent_vectors")
             conn.executescript(schema)
+            # Backfill the (possibly just-recreated) vector table from embedding_json
+            if self.sqlite_vec_available and self._has_agent_vectors_table(conn):
+                count = conn.execute("SELECT COUNT(*) FROM agent_vectors").fetchone()[0]
+                if count == 0:
+                    for r in conn.execute(
+                        "SELECT agent_id, embedding_json FROM agents WHERE status='active'"
+                    ).fetchall():
+                        conn.execute(
+                            "INSERT INTO agent_vectors (agent_id, embedding) VALUES (?, ?)",
+                            (r["agent_id"], r["embedding_json"]),
+                        )
             # Migration: add skill_ids_json column if missing (added after v1.5)
             try:
                 conn.execute(

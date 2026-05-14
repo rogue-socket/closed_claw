@@ -50,5 +50,5 @@ CREATE TABLE IF NOT EXISTS provider_circuit_breakers (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS agent_vectors USING vec0(
   agent_id TEXT,
-  embedding float[384]
+  embedding float[384] distance_metric=cosine
 );

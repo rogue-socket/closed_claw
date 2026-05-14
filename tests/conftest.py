@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from closed_claw.config import Settings
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Snapshot ``os.environ`` per test and restore after.
+
+    ``Settings.from_env`` propagates dotenv values into ``os.environ`` via
+    ``setdefault``. Once leaked, subsequent ``from_env`` calls in the same
+    process see the previously-set value and ignore their own ``.env``,
+    which makes any test that simulates a different ``.env`` flaky.
+    """
+    saved = os.environ.copy()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 def make_test_settings(tmp_path: Path, **overrides) -> Settings:

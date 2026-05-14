@@ -19,6 +19,7 @@ logger = logging.getLogger("closed_claw.web")
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from closed_claw.agents.factory import AgentFactory, AgentManifest
+from closed_claw.web.serializers import shape_agent_row
 from closed_claw.config import Settings
 from closed_claw.coordinator.graph import build_graph
 from closed_claw.policy.approval import get_pending_approvals, resolve_approval
@@ -720,15 +721,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (limit,),
             ).fetchall()
             conn.close()
-            out = []
-            for r in rows:
-                d = dict(r)
-                d["tags"] = d.pop("tags_json", "[]") or "[]"
-                d["tools_allowlist"] = d.pop("tools_allowlist_json", "[]") or "[]"
-                d["api_capabilities"] = d.pop("api_capabilities_json", "[]") or "[]"
-                d["skill_ids"] = d.pop("skill_ids_json", "[]") or "[]"
-                out.append(d)
-            return out
+            return [shape_agent_row(dict(r)) for r in rows]
         except Exception:
             return []
 

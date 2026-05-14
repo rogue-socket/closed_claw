@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last updated:** 2026-02-26 · **Doc version:** 2.0.0 · **Entrypoint template:** v13
+> **Last updated:** 2026-05-15 · **Doc version:** 2.1.0 · **Entrypoint template:** v14 (shared shim — body in `closed_claw/runtime/agent_loop.py`)
 >
 > Deep reference. For a quick file-by-file map, see `CODEBASE_MAP.md`. For conventions, see `CONVENTIONS.md`.
 
@@ -95,7 +95,7 @@ agents/
     manifest.json   # AgentManifest — identity, metrics, tools_allowlist, tags, skill_ids, embedding
     skill.md        # Role overlay — agent-specific identity + decision rules (Layer 2)
     memory.db       # SQLite episodic memory (key/value; agent-writable)
-    entrypoint.py   # Subprocess entry; speaks JSON-line protocol (v13 — ReAct loop)
+    entrypoint.py   # Thin shim (v14) — delegates to closed_claw.runtime.agent_loop
     logs/           # Per-run output artifacts
 ```
 
@@ -104,7 +104,7 @@ agents/
 1. **Creation:** `CoordinatorNodes._acquire_agent_for_role` calls `AgentFactory.create_capsule()`, which writes the capsule directory. `generate_agent_profile` (via LLM or heuristic) produces `skill.md`, `tools_allowlist`, and `skill_ids` — a list of base skill module IDs the agent should inherit.
 2. **Reuse:** If a registered agent's embedding is above `low_confidence_threshold` for the current task, it is reused directly.
 3. **System prompt composition:** Before each run, `CoordinatorNodes._compose_system_prompt()` loads all `agents/skills/<id>.md` files listed in `manifest.skill_ids` (Layer 1) then appends `agents/<agent_id>/skill.md` (Layer 2). The result is passed as `config["system_prompt"]` in the `CoordinatorRequest`.
-4. **Execution:** `AgentRunner.run_agent(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop. The v13 entrypoint reads `config["system_prompt"]` and injects it as the system role message in every LLM call.
+4. **Execution:** `AgentRunner.run_agent(agent_dir, request, on_intent)` launches `entrypoint.py` as a subprocess and drives the I/O loop. The v14 shim delegates to `closed_claw.runtime.agent_loop.main`, which reads `config["system_prompt"]` and injects it as the system role message in every LLM call. Centralising the loop body means a fix lands in every capsule without per-capsule rewrites — capsules just need the entrypoint version bumped via `cli rewrite-entrypoints`.
 5. **Metrics:** After each run, `RegistryStore` metrics update records `usage_count`, `success_rate`, `avg_latency_ms`.
 
 ---
@@ -130,9 +130,9 @@ Layer 2 — Role overlay (agents/<agent_id>/skill.md)
 
 The resulting string is injected as:
 - `config["system_prompt"]` in `CoordinatorRequest` (passed to the subprocess)
-- The system/role message prepended to every LLM call inside the v13 entrypoint
+- The system/role message prepended to every LLM call inside the shared `agent_loop.main` body (v14 shim)
 
-**Adding a new base skill:** Create `agents/skills/<name>.md` and add the module name to `_BASE_SKILL_IDS` in `registry/search.py`. The LLM will then be able to assign it to new agents via `generate_agent_profile`.
+**Adding a new base skill:** Create `agents/skills/<name>.md`, add the module name to `_BASE_SKILL_IDS` in `registry/search.py`, **and** add a short faithful scope description to `_BASE_SKILL_DESCRIPTIONS` in the same file. The description is injected into the profile-gen prompt via `_build_skill_catalog()` so the LLM picks the skill on its actual scope rather than guessing from the bare ID — agents/skills/*.md files don't currently exist on disk, so the description is the only ground truth the prompt has.
 
 ---
 
@@ -169,9 +169,11 @@ Coordinator                         Agent
 | `ToolCallResult` | → Agent | `ok`, `result`, `error` |
 | `ApiCallIntent` | ← Agent | `provider`, `endpoint`, `estimated_cost_usd`, `reason` |
 | `ApiCallDecision` | → Agent | `approved`, `note` |
-| `AgentResponse` | ← Agent | `status`, `result`, `memory_updates`, `artifacts`, `metrics` |
+| `AgentResponse` | ← Agent | `status` (`"ok"` or `"error"`), `result`, `memory_updates`, `artifacts`, `metrics` |
 
 An agent **must** emit exactly one `AgentResponse` as its final line.
+
+Inside the loop, the agent's `final` action accepts an optional `status` field — `{"type":"final","status":"ok"|"error","result":...}`. Emit `status="error"` when the task cannot be completed with the available tools (required tool missing, hard constraint violated). The coordinator treats agent-self-status `"error"` as a subtask failure and propagates to the top-level run status — so agents never need to wrap "I gave up" as success-shaped text.
 
 ---
 
@@ -359,7 +361,7 @@ agents/                   # agent capsule store
     manifest.json         # includes skill_ids list
     skill.md              # role overlay (Layer 2)
     memory.db
-    entrypoint.py         # v13 (ReAct-style loop)
+    entrypoint.py         # v14 shim → closed_claw.runtime.agent_loop
     logs/
 ```
 

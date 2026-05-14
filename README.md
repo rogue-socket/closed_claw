@@ -21,7 +21,7 @@ Closed Claw lets a coordinator LLM automatically **discover or create specialize
 
 - **Capsule-based agents** — each agent is an isolated subprocess with its own manifest, skills, memory, and entrypoint
 - **Two-phase task execution** — discovery phase gathers information, execution phase takes action
-- **ReAct-style reasoning** (v13) — agents observe → think → act each step, with the LLM deciding the next action dynamically
+- **ReAct-style reasoning** (v14, shared shim) — agents observe → think → act each step, with the LLM deciding the next action dynamically; loop body lives in `closed_claw/runtime/agent_loop.py` so every capsule's `entrypoint.py` is a thin delegating shim
 - **Semantic agent routing** — embed tasks, search agent vectors via sqlite-vec, rerank with LLM
 - **Human approval gates** — configurable per create/reuse decisions and paid API calls (interactive, auto-approve, auto-deny, or web UI)
 - **Sandboxed tool execution** — per-agent allowlists enforce which tools each agent can use
@@ -122,7 +122,7 @@ User Task
           ▼         ▼         ▼
      ┌─────────┐ ┌─────────┐ ┌─────────┐
      │ Agent 1 │ │ Agent 2 │ │ Agent N │   ← isolated subprocesses
-     │ (v13    │ │ (v13    │ │ (v13    │
+     │ (v14    │ │ (v14    │ │ (v14    │
      │ ReAct)  │ │ ReAct)  │ │ ReAct)  │
      └────┬────┘ └────┬────┘ └────┬────┘
           │           │           │
@@ -140,7 +140,7 @@ User Task
 
 1. **Ingest** — user task is received and embedded
 2. **Decompose** — LLM generates a task plan (two-phase: discovery → execution)
-3. **Execute** — agents are matched (semantic search + LLM reranking) or created on the fly; each agent runs in a subprocess using the v13 ReAct loop (observe → think → act, up to 15 steps)
+3. **Execute** — agents are matched (semantic search + LLM reranking) or created on the fly; each agent runs in a subprocess using the v14 ReAct loop (observe → think → act, default 12 steps) — the loop body lives in `closed_claw/runtime/agent_loop.py` and each capsule's `entrypoint.py` is a thin shim
 4. **Validate** — subtask outputs are checked against acceptance criteria
 5. **Audit** — run metrics, agent usage, approvals, and tool events are persisted
 6. **Synthesize** — LLM combines all subtask results into a coherent final response
@@ -154,7 +154,7 @@ agents/<agent_id>/
   manifest.json      # id, name, tools_allowlist, tags, skill_ids, metrics, embedding
   skill.md           # agent-specific role, decision rules, output format (Layer 2)
   memory.db          # per-agent SQLite episodic memory
-  entrypoint.py      # subprocess entrypoint (v13 ReAct, JSON-line protocol)
+  entrypoint.py      # subprocess entrypoint shim (v14 — delegates to closed_claw.runtime.agent_loop)
   logs/              # per-run output artifacts
 ```
 
@@ -315,7 +315,9 @@ closed_claw/                    # Main package + Python 3.11 venv
   setup_wizard.py               # Guided provider/key setup + live verification
   compat.py                     # Pydantic v1/v2 compatibility shim
   agents/
-    factory.py                  # AgentFactory + v13 entrypoint template
+    factory.py                  # AgentFactory + v14 entrypoint shim template
+  runtime/
+    agent_loop.py               # shared ReAct loop body imported by every capsule shim
   coordinator/
     graph.py                    # LangGraph StateGraph (6 nodes)
     nodes.py                    # CoordinatorNodes (~1650 lines)

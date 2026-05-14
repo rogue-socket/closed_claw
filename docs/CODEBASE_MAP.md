@@ -33,7 +33,8 @@ Empty package marker.
 | `cmd_cancel_run` | function | Sets a cancellation flag in the run log to stop a running task |
 | `cmd_web` | function | Launches FastAPI web dashboard on `http://127.0.0.1:7860` |
 | `_build_parser` | function | Constructs the argparse tree; register new commands here |
-| `_migrate_legacy_agents` | function | Auto-migrates agent entrypoints to v13 on `init`/`run` |
+| `_migrate_legacy_agents` | function | Auto-migrates agent entrypoints to v14 on `init`/`run` |
+| `cmd_rewrite_entrypoints` | function | Overwrites every capsule's `entrypoint.py` with the current shim template (use after bumping `CLOSED_CLAW_ENTRYPOINT_VERSION`) |
 | `_sync_registry_index` | function | Syncs `agents/registry.json` from DB state |
 | `main` | function | CLI entry (`python -m closed_claw.cli`) — opens menu if no subcommand |
 
@@ -111,12 +112,12 @@ Called by `main()` in `cli.py` when no subcommand is given.
 
 | Symbol | Type | What it does |
 |--------|------|-------------|
-| `ENTRYPOINT_TEMPLATE` | str constant | Template for `entrypoint.py` (currently **v13**). Contains a ReAct-style observe→think→act loop (MAX_STEPS=15, MAX_CONSECUTIVE_ERRORS=4). v13 replaced the v12 frozen plan with per-step LLM-driven action selection; adds role boundary enforcement; no-repeat-tool-call rule. Auto-migrated on `cli init` / `cli run`. |
+| `ENTRYPOINT_TEMPLATE` | str constant | Template for `entrypoint.py` (currently **v14**). Thin shim that `import`s and calls `closed_claw.runtime.agent_loop.main`. v14 replaced the v13 per-capsule loop body with a shared module so fixes land in every capsule via `cli rewrite-entrypoints` (no per-capsule code edit). Loop config (`agent_loop_max_steps`, `agent_loop_max_consecutive_errors`) is read from `config` at run time. Auto-migrated on `cli init` / `cli run`. |
 | `AgentFactory` | class | Creates capsule dirs: `manifest.json`, `skill.md`, `memory.db`, `entrypoint.py`, `logs/` |
 | `AgentFactory.create_capsule(name, description, ..., skill_content, skill_ids)` | method | Writes capsule files to `agents_dir/<agent_id>/`; updates `registry.json`; stores `skill_ids` in manifest |
 | `AgentFactory.save_registry_index(path, manifests)` | static method | Overwrites `registry.json` with a fresh list |
 
-**Version detection:** The entrypoint template version tag (`CLOSED_CLAW_ENTRYPOINT_VERSION=13`) is read by `_migrate_legacy_agents` in `cli.py` to auto-upgrade older capsules.
+**Version detection:** The entrypoint template version tag (`CLOSED_CLAW_ENTRYPOINT_VERSION=14`) is read by `_migrate_legacy_agents` in `cli.py` to auto-upgrade older capsules. The shared loop body lives at `closed_claw/runtime/agent_loop.py` — see the `closed_claw/runtime/` package section below.
 
 ---
 
@@ -170,7 +171,11 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 | `_request_config_for_agent` | method | Builds `config` dict for `CoordinatorRequest` — includes `llm`, `system_prompt` (composed), and `tool_registry` |
 | `_prepare_phase_pool` | method | Prepares a subtask pool for a given phase (discovery or execution) |
 | `_execute_phase_pool` | method | Runs all subtasks in a phase pool with dependency-awareness |
-| `_run_single_subtask` | method | Executes one subtask: acquires agent, runs it, handles retries |
+| `_run_single_subtask` | method | Executes one subtask: acquires agent, runs it, handles retries. Runs `_verify_subtask_tool_execution` + `_verify_acceptance_criteria` before marking the subtask `completed` |
+| `_find_reusable_capability_agent` | method | Reuse gate: semantic-similarity-primary search; role-tag overlap + required-tools subset as sanity filters; below-threshold candidates skipped; success-rate-weighted ranking |
+| `_should_skip_discovery` | static method | Decides whether to skip discovery based on which subtask pools are populated (used by the `execute_task_pool` simple-classification fast path) |
+| `_verify_subtask_tool_execution` | static method | Filesystem-side check that any tool actually ran for a tool-requiring subtask |
+| `_verify_acceptance_criteria` | static method | Lightweight content check: matches eight canonical "I gave up" failure phrasings (safety net for the agent's self-reported `status`) plus the `$HOME` / `~` rejection for "absolute path" criteria |
 | `_merge` | static method | Shallow-merges two state dicts |
 | `_emit_runlog` | method | Writes a named event to the run's JSONL log |
 
@@ -272,14 +277,18 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 
 | Symbol | What it does |
 |--------|-------------|
-| `_BASE_SKILL_IDS` | `list[str]` constant — canonical list of available base skill module IDs; must match files in `agents/skills/` |
+| `_BASE_SKILL_IDS` | `list[str]` constant — canonical list of available base skill module IDs; intended to match files in `agents/skills/` (those files don't exist on disk yet; see `_BASE_SKILL_DESCRIPTIONS`) |
+| `_BASE_SKILL_DESCRIPTIONS` | `dict[str, str]` constant — short faithful scope description per skill ID; serves as the ground truth the profile-gen prompt sees until per-skill `.md` files exist |
+| `_build_tool_catalog(allowed)` | Injects description + args_schema + side_effects per tool into the profile-gen prompt (Fix A — closes hallucinated-capability bug where bare names let the LLM invent tool constraints) |
+| `_build_skill_catalog()` | Mirror of `_build_tool_catalog` for skill IDs — same hallucination-closing pattern, applied to skill modules |
+| `_CANONICAL_ROLE_RULES` / `_derive_canonical_tags(task, description, tools)` | Deterministic regex-based tagging (`fs.list`, `db.read`, `tool.terminal`, ...) appended to LLM-generated tags so reuse tag-overlap doesn't depend on LLM tag stability |
 | `RerankerProtocol` | Protocol interface — `.rerank(task, candidates) -> list[Candidate]` |
 | `HeuristicReranker` | Keyword overlap + recency scoring; used internally as fallback when LLM calls fail |
 | `LLMReranker` | Uses configured LLM provider to rerank candidates |
 | `build_reranker(settings)` | Builds an `LLMReranker` using the configured provider |
 | `generate_task_plan(settings, task, *, phase, discovery_results)` | Decomposes task text into subtask list via LLM/heuristic; supports `phase="discovery"` and `phase="execution"` with `discovery_results` |
 | `generate_agent_profile(settings, task, supported_tools, fallback_tools)` | Generates `skill_md`, `tools_allowlist`, and `skill_ids` for a new agent |
-| `_normalize_profile_payload(payload)` | Validates and normalises LLM-returned profile dict; filters `skill_ids` to valid `_BASE_SKILL_IDS` members |
+| `_normalize_profile_payload(payload, task)` | Validates and normalises LLM-returned profile dict; filters `skill_ids` to valid `_BASE_SKILL_IDS` members; appends `_derive_canonical_tags(...)` output to `tags` |
 
 ---
 
@@ -311,6 +320,19 @@ ingest_task → decompose_task → execute_task_pool → validate_outputs
 | `AgentRunner.run_agent(agent_dir, request, on_intent)` | Sends `CoordinatorRequest`, loops on intents until `AgentResponse`, returns it |
 
 `on_intent` is a callback `(intent) -> str` that the coordinator uses to handle `ApiCallIntent`/`ToolCallIntent` and return the JSON-encoded response line.
+
+---
+
+### `agent_loop.py`
+**Purpose:** Shared ReAct loop body imported by every capsule's `entrypoint.py` shim (v14). Centralising it means a fix lands in every capsule without rewriting per-capsule code — `cli rewrite-entrypoints` bumps the shim version.
+
+| Symbol | What it does |
+|--------|-------------|
+| `CLOSED_CLAW_ENTRYPOINT_VERSION` | int constant (currently `14`) read by `_migrate_legacy_agents` |
+| `main()` | Subprocess entry. Reads `CoordinatorRequest` from stdin, runs the ReAct loop (observe → think → act), prints `AgentResponse` to stdout |
+| `append_memory(memory_db, session_id, content)` | Persists one episodic memory row |
+
+**Final-action protocol:** the agent's `final` JSON action accepts an optional `status` field — `{"type":"final","status":"ok"|"error","result":...,"artifacts":[]}`. Emit `status="error"` only when the task cannot be completed with the available tools; the coordinator treats this as a subtask failure and propagates to the run's top-level status.
 
 ---
 
@@ -399,7 +421,7 @@ Shared base skill library. Each file is a Markdown document describing tool usag
 | `sql_databases.md` | `sql_query` tool, SELECT-only SQLite |
 | `data_analysis.md` | Cross-tool data pipeline patterns |
 
-To add a module: create the `.md` file here and add its name to `_BASE_SKILL_IDS` in `registry/search.py`.
+To add a module: create the `.md` file here, add its name to `_BASE_SKILL_IDS`, **and** add a short faithful scope description to `_BASE_SKILL_DESCRIPTIONS` (both in `registry/search.py`). The description is the only ground truth the profile-gen prompt sees while the `.md` files don't exist on disk.
 
 ### `agents/<agent_id>/`
 | File | Purpose |
@@ -407,7 +429,7 @@ To add a module: create the `.md` file here and add its name to `_BASE_SKILL_IDS
 | `manifest.json` | `AgentManifest` — identity, tools, metrics, tags, skill_ids, embedding |
 | `skill.md` | Role overlay (Layer 2) — agent-specific identity, decision rules, output format |
 | `memory.db` | Per-agent SQLite episodic memory (key/value store) |
-| `entrypoint.py` | Agent subprocess (v13 ReAct-style loop); speaks JSON-line protocol; reads `config["system_prompt"]` |
+| `entrypoint.py` | Thin shim (v14) that imports and calls `closed_claw.runtime.agent_loop.main`; the loop body itself lives in that shared module |
 | `logs/` | Per-run output artifacts |
 
 ### `agents/registry.json`

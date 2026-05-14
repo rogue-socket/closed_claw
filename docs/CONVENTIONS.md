@@ -128,12 +128,14 @@ Base skill modules live in `agents/skills/` and form Layer 1 of every agent's sy
    - Error handling and edge cases
    - Output format expectations
 2. Add the module name string to `_BASE_SKILL_IDS` in `closed_claw/registry/search.py` — this makes the LLM aware of the module when generating new agent profiles.
-3. The LLM will automatically assign the module to relevant agents via `generate_agent_profile`. You can also manually add the name to an existing `manifest.json` `skill_ids` list.
+3. Add a short faithful scope description to `_BASE_SKILL_DESCRIPTIONS` in the same file. This description is injected into the profile-gen prompt via `_build_skill_catalog()`. Without it, the LLM only sees the bare ID and hallucinates capabilities into permanent `skill_md` (same bug class as the bare-tool-names Fix A in `_build_tool_catalog`).
+4. The LLM will automatically assign the module to relevant agents via `generate_agent_profile`. You can also manually add the name to an existing `manifest.json` `skill_ids` list.
 
 **Rules:**
 - Module names must be lowercase `snake_case` and match the filename without `.md`.
 - Never include agent-specific content in a base skill module — that belongs in `agents/<agent_id>/skill.md`.
 - `skill_ids` in `AgentManifest` are always validated against `_BASE_SKILL_IDS` in `_normalize_profile_payload`; unknown IDs are silently dropped.
+- `_BASE_SKILL_DESCRIPTIONS` is the only ground truth the profile prompt sees while the `agents/skills/*.md` files don't exist on disk — keep descriptions faithful to what the underlying tools actually do.
 
 ---
 

@@ -90,6 +90,35 @@ def test_generate_agent_profile_llm_output_sanitized(monkeypatch):
     assert profile["skill_md"].startswith("# ")
 
 
+def test_generate_agent_profile_prompt_includes_tool_constraints(monkeypatch):
+    """The profile-creation prompt must include tool descriptions and constraints,
+    not just bare tool names — otherwise the LLM hallucinates capabilities into
+    permanent skill_md (e.g., assuming sql_query supports DDL/INSERT)."""
+    captured = {}
+
+    def _fake_generate(**kwargs: object) -> str:
+        captured["prompt"] = kwargs.get("prompt", "")
+        return (
+            '{"profile_id":"x","name_prefix":"x","description":"x",'
+            '"tools_allowlist":["sql_query"],"tags":["auto","capability"],'
+            '"skill_md":"x"}'
+        )
+
+    monkeypatch.setattr("closed_claw.registry.search._generate_text_with_provider", _fake_generate)
+    generate_agent_profile(
+        settings=_settings(provider="openai", openai_key="k"),
+        task="Count rows in a sqlite table.",
+        supported_tools=["sql_query", "file_io", "python_exec"],
+        fallback_tools=["python_exec"],
+    )
+    prompt = captured["prompt"]
+    assert "Tool catalog" in prompt
+    assert "SELECT" in prompt, "sql_query SELECT-only constraint missing from prompt"
+    assert "args_schema" in prompt
+    assert "escapes are blocked" in prompt, "file_io workspace constraint missing"
+    assert "stdin is closed" in prompt, "python_exec constraint missing"
+
+
 def test_generate_task_plan_heuristic_raises():
     """generate_task_plan must raise when provider is heuristic."""
     with pytest.raises(ValueError, match="LLM provider required"):
@@ -107,3 +136,59 @@ def test_generate_task_plan_discovery_phase_heuristic_raises():
             task="Gather context before implementing a file task.",
             phase="discovery",
         )
+
+
+def test_canonical_tags_collapse_drift(monkeypatch):
+    """Two LLM responses with drifted free-text tags but same intent and tools
+    should end up sharing canonical role + tool tags after normalization.
+    This is what the reuse tag-overlap filter relies on."""
+    drift_a = (
+        '{"profile_id":"p","name_prefix":"x","description":"Lists directory contents.",'
+        '"tools_allowlist":["terminal","file_io"],"tags":["filesystem-navigator"],'
+        '"skill_md":"x"}'
+    )
+    drift_b = (
+        '{"profile_id":"p","name_prefix":"x","description":"Enumerates files in a folder.",'
+        '"tools_allowlist":["terminal","file_io"],"tags":["folder-enumerator"],'
+        '"skill_md":"x"}'
+    )
+
+    monkeypatch.setattr(
+        "closed_claw.registry.search._generate_text_with_provider",
+        lambda **_: drift_a,
+    )
+    pa = generate_agent_profile(
+        settings=_settings(provider="openai", openai_key="k"),
+        task="List the files in /tmp",
+        supported_tools=["terminal", "file_io"],
+        fallback_tools=["terminal"],
+    )
+
+    monkeypatch.setattr(
+        "closed_claw.registry.search._generate_text_with_provider",
+        lambda **_: drift_b,
+    )
+    pb = generate_agent_profile(
+        settings=_settings(provider="openai", openai_key="k"),
+        task="Enumerate top-level items under /Users/foo",
+        supported_tools=["terminal", "file_io"],
+        fallback_tools=["terminal"],
+    )
+
+    # Free-text tags drift — confirm
+    assert "filesystem-navigator" in pa["tags"]
+    assert "folder-enumerator" in pb["tags"]
+    assert "filesystem-navigator" not in pb["tags"]
+
+    # Canonical tags converge — both should carry fs.list + tool.* fingerprints
+    assert "fs.list" in pa["tags"]
+    assert "fs.list" in pb["tags"]
+    assert "tool.terminal" in pa["tags"]
+    assert "tool.terminal" in pb["tags"]
+    assert "tool.file_io" in pa["tags"]
+    assert "tool.file_io" in pb["tags"]
+
+    # Reuse-gate's tag-overlap filter would now pass between these two profiles
+    noise = {"auto", "capability"}
+    overlap = (set(pa["tags"]) - noise) & (set(pb["tags"]) - noise)
+    assert overlap, f"expected non-empty overlap after canonicalization, got {overlap}"

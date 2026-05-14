@@ -70,6 +70,12 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "listing processes, checking system info, or any CLI utility. "
             "Commands are executed WITHOUT a shell — no pipes, redirections, or "
             "chaining (&&, ||, ;). Pass a single program with arguments. "
+            "Environment variables and ~ are NOT expanded: `echo $HOME` returns the "
+            "literal string `$HOME`, and `ls ~/Desktop` fails because `~` is treated "
+            "as a literal character. To read an env var, use `printenv VARNAME` "
+            "(prints the value). To get $HOME, use `printenv HOME`. Use absolute "
+            "paths (e.g. `/Users/alice/Desktop`). If python_exec is in your "
+            "allowlist, prefer it for path/env work via os.environ / os.path.expanduser. "
             "Destructive commands (rm -rf, format, dd) are blocked."
         ),
         "args_schema": {"cmd": "string", "timeout_s": "int(optional, default=15)"},
@@ -113,7 +119,9 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "Read, write, append, or list files and directories inside the workspace. "
             "Operations: 'list' (directory listing), 'read' (file content), "
             "'write' (create/overwrite), 'append' (add to end). "
-            "Path must be within allowed workspace roots — escapes are blocked. "
+            "Path must be absolute (start with `/`) and within allowed workspace roots — "
+            "escapes are blocked. Environment variables, `~`, and `$HOME` are NOT "
+            "expanded — pass the fully-resolved absolute path. "
             "Use for: reading source code, writing outputs, exploring project structure."
         ),
         "args_schema": {
@@ -192,8 +200,24 @@ class ToolExecutor:
     }
 
     def __init__(self, workspace_root: Path, allowed_roots: list[Path] | None = None) -> None:
-        """Initialize the instance."""
-        self.workspace_root = workspace_root.resolve()
+        """Initialize the instance.
+
+        Validates that ``workspace_root`` exists and is a directory. A missing
+        path (e.g. a misconfigured ``CLOSED_CLAW_EXTRA_ALLOWED_PATHS[0]``)
+        would otherwise surface as a confusing per-tool-call ``FileNotFoundError``
+        from ``subprocess.run(cwd=...)``, masking the real misconfiguration.
+        """
+        resolved = workspace_root.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(
+                f"ToolExecutor workspace_root does not exist: {resolved}. "
+                "Check CLOSED_CLAW_EXTRA_ALLOWED_PATHS or the configured agents_dir."
+            )
+        if not resolved.is_dir():
+            raise NotADirectoryError(
+                f"ToolExecutor workspace_root is not a directory: {resolved}."
+            )
+        self.workspace_root = resolved
         self.allowed_roots = [self.workspace_root]
         if allowed_roots:
             self.allowed_roots.extend(p.resolve() for p in allowed_roots)
@@ -340,14 +364,19 @@ class ToolExecutor:
         if not argv:
             raise ToolExecutionError("terminal requires non-empty 'cmd'")
 
-        proc = subprocess.run(
-            argv,
-            shell=False,
-            cwd=self.workspace_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        try:
+            proc = subprocess.run(
+                argv,
+                shell=False,
+                cwd=self.workspace_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+        except FileNotFoundError as exc:
+            raise ToolExecutionError(f"command not found on PATH: {argv[0]!r}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ToolExecutionError(f"command timed out after {timeout_s}s") from exc
         return {
             "returncode": proc.returncode,
             "stdout": self._truncate_output(proc.stdout, self._MAX_OUTPUT_BYTES),
@@ -405,6 +434,10 @@ class ToolExecutor:
         without following symlinks) *and* the fully-resolved path so that a
         symlink placed inside the workspace cannot redirect access outside.
         """
+        # Resolve $WORKSPACE / ${WORKSPACE} placeholders that some LLMs pass
+        # through literally despite being told the resolved path.
+        workspace_str = str(self.workspace_root)
+        path_str = path_str.replace("${WORKSPACE}", workspace_str).replace("$WORKSPACE", workspace_str)
         path = Path(path_str).expanduser()
         if not path.is_absolute():
             path = self.workspace_root / path
@@ -503,14 +536,17 @@ class ToolExecutor:
                 )
                 break
 
-        proc = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=self.workspace_root,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=self.workspace_root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolExecutionError(f"python_exec timed out after {timeout_s}s") from exc
         stderr = proc.stderr
         if interactive_warning:
             stderr = interactive_warning + stderr

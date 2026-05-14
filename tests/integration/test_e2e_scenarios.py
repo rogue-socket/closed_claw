@@ -195,6 +195,7 @@ def _build_and_run(
     monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", str(tmp_path / "agents"))
     monkeypatch.setenv("CLOSED_CLAW_RUN_LOGS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("CLOSED_CLAW_EMBEDDING_DIM", "8")
+    monkeypatch.setenv("CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS", "false")
     monkeypatch.setenv("CLOSED_CLAW_REQUIRE_SQLITE_VEC", "false")
     monkeypatch.setenv("CLOSED_CLAW_CREATE_APPROVAL_REQUIRED", "false")
     monkeypatch.setenv("CLOSED_CLAW_CREATE_APPROVAL_MODE", "approve")
@@ -333,7 +334,7 @@ def test_tc02_count_python_files(monkeypatch, tmp_path: Path):
         profiles={"terminal-operator": _profile("terminal-operator", ["terminal"])},
         tool_sequences={
             "terminal-operator": [
-                {"tool": "terminal", "args": {"cmd": f"find {tmp_path} -name '*.py' -not -path '*/agents/*' | wc -l"}, "reason": "count files"},
+                {"tool": "terminal", "args": {"cmd": f"find {tmp_path} -name *.py -not -path */agents/*"}, "reason": "count files"},
             ],
         },
         results={"terminal-operator": "Found 3 Python files in the project"},

@@ -73,6 +73,7 @@ def test_end_to_end_flow_with_approval(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLOSED_CLAW_DB_PATH", str(tmp_path / "registry.db"))
     monkeypatch.setenv("CLOSED_CLAW_AGENTS_DIR", str(tmp_path / "agents"))
     monkeypatch.setenv("CLOSED_CLAW_EMBEDDING_DIM", "8")
+    monkeypatch.setenv("CLOSED_CLAW_ENABLE_SENTENCE_TRANSFORMERS", "false")
     monkeypatch.setenv("CLOSED_CLAW_CREATE_APPROVAL_REQUIRED", "true")
     monkeypatch.setenv("CLOSED_CLAW_LOW_CONFIDENCE_THRESHOLD", "0.95")
 

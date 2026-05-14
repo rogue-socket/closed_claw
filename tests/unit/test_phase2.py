@@ -100,8 +100,8 @@ class TestTerminalSecurity:
     def test_safe_commands_not_blocked(self, tmp_path: Path):
         """Normal commands like ls, cat, git are not blocked."""
         executor = ToolExecutor(workspace_root=tmp_path)
-        # These should NOT raise
-        for cmd in ["echo safe", "python --version"]:
+        # These should NOT raise — using commands available on every POSIX system.
+        for cmd in ["echo safe", "pwd"]:
             result = executor.execute("terminal", {"cmd": cmd}, allowlist=["terminal"])
             assert isinstance(result["returncode"], int)
 

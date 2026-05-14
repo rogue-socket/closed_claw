@@ -15,6 +15,7 @@ from closed_claw.config import Settings
 from closed_claw.agents.factory import AgentFactory, ENTRYPOINT_TEMPLATE
 from closed_claw.coordinator.graph import build_graph
 from closed_claw.interactive import run_main_menu
+from closed_claw.llm_client import probe_key
 from closed_claw.policy.audit import AuditStore
 from closed_claw.registry.store import AgentManifest, RegistryStore
 from closed_claw.setup_wizard import run_setup_wizard
@@ -380,6 +381,20 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "siemens": settings.siemens_api_key,
     }.get(settings.llm_provider, settings.llm_api_key)
     llm_key_configured = bool(provider_key or settings.llm_api_key)
+    effective_key = (provider_key or settings.llm_api_key or "").strip()
+    base_url = {
+        "openai": settings.openai_base_url,
+        "gemini": settings.gemini_base_url,
+        "claude": settings.anthropic_base_url,
+        "siemens": settings.siemens_base_url,
+    }.get(settings.llm_provider, "")
+    probe_ok, probe_detail = probe_key(
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        api_key=effective_key,
+        base_url=base_url,
+        timeout_s=5,
+    )
     checks: dict[str, Any] = {
         "db_path": str(settings.db_path),
         "agents_dir": str(settings.agents_dir),
@@ -390,6 +405,8 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "llm_key_env": key_name,
         "llm_key_configured": llm_key_configured,
         "llm_key_preview": ("set(" + str(len(provider_key or settings.llm_api_key)) + " chars)") if llm_key_configured else "not set",
+        "llm_key_probe_ok": probe_ok,
+        "llm_key_probe_detail": probe_detail,
         "sqlite_vec_ok": False,
         "langgraph_ok": False,
     }
@@ -507,6 +524,14 @@ def cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rewrite_entrypoints(_: argparse.Namespace) -> int:
+    """Overwrite every capsule's entrypoint.py with the current shim template."""
+    settings = Settings.from_env()
+    rewritten = AgentFactory.rewrite_entrypoints(settings.agents_dir)
+    print(json.dumps({"rewritten_count": len(rewritten), "agent_ids": rewritten}, indent=2))
+    return 0
+
+
 def cmd_delete_all_agents(args: argparse.Namespace) -> int:
     """Run cmd delete all agents."""
     settings = Settings.from_env()
@@ -611,6 +636,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_delete_all.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     p_delete_all.set_defaults(func=cmd_delete_all_agents)
 
+    p_rewrite = sub.add_parser(
+        "rewrite-entrypoints",
+        help="Overwrite each capsule's entrypoint.py with the current shim",
+    )
+    p_rewrite.set_defaults(func=cmd_rewrite_entrypoints)
+
     p_menu = sub.add_parser("menu", help="Open interactive main menu")
     p_menu.set_defaults(func=None)
 
@@ -641,6 +672,7 @@ def main() -> int:
         "tools": cmd_tools,
         "delete_agent": cmd_delete_agent,
         "delete_all_agents": cmd_delete_all_agents,
+        "rewrite_entrypoints": cmd_rewrite_entrypoints,
         "web": cmd_web,
     }
 

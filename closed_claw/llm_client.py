@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import httpx
+
 if TYPE_CHECKING:
     from closed_claw.config import Settings
 
@@ -49,6 +51,14 @@ def generate_text(
     """Send a single-turn text prompt to an LLM provider and return the response."""
     import httpx
 
+    def _raise(resp: httpx.Response) -> None:
+        if resp.is_success:
+            return
+        body = (resp.text or "")[:600]
+        raise RuntimeError(
+            f"{provider} {resp.status_code} {resp.reason_phrase} from {resp.request.url}: {body}"
+        )
+
     if provider in ("openai", "siemens"):
         with httpx.Client(timeout=timeout_sec) as client:
             resp = client.post(
@@ -61,7 +71,7 @@ def generate_text(
                     "max_tokens": max_tokens,
                 },
             )
-            resp.raise_for_status()
+            _raise(resp)
             return resp.json()["choices"][0]["message"]["content"]
 
     if provider == "gemini":
@@ -74,7 +84,7 @@ def generate_text(
                     "generationConfig": {"temperature": temperature},
                 },
             )
-            resp.raise_for_status()
+            _raise(resp)
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
     if provider == "claude":
@@ -93,7 +103,7 @@ def generate_text(
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
-            resp.raise_for_status()
+            _raise(resp)
             parts = [
                 block.get("text", "")
                 for block in resp.json().get("content", [])
@@ -102,3 +112,48 @@ def generate_text(
             return " ".join(parts)
 
     raise ValueError(f"unsupported provider: {provider}")
+
+
+def probe_key(
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    timeout_s: int = 5,
+) -> tuple[bool, str]:
+    """Lightly probe an LLM provider to verify the API key is currently usable.
+
+    Returns ``(ok, detail)``. ``ok=True`` means the provider accepted the key
+    (HTTP 2xx). On 401/403 it returns ``(False, "unauthorized")``; on any
+    other HTTP or network error it returns ``(False, "<short reason>")`` —
+    never raises. Cheap GET-style endpoint per provider; no token usage.
+    """
+    if not (api_key or "").strip():
+        return False, "no_key"
+    provider = (provider or "").lower()
+    base = (base_url or "").rstrip("/")
+    try:
+        if provider in {"openai", "siemens"}:
+            url = f"{base}/v1/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            with httpx.Client(timeout=timeout_s) as client:
+                resp = client.get(url, headers=headers)
+        elif provider == "gemini":
+            url = f"{base}/v1beta/models"
+            with httpx.Client(timeout=timeout_s) as client:
+                resp = client.get(url, params={"key": api_key})
+        elif provider == "claude":
+            url = f"{base}/v1/models"
+            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+            with httpx.Client(timeout=timeout_s) as client:
+                resp = client.get(url, headers=headers)
+        else:
+            return False, "unsupported_provider"
+    except httpx.HTTPError as exc:
+        return False, f"network_error:{exc.__class__.__name__}"
+    if 200 <= resp.status_code < 300:
+        return True, "ok"
+    if resp.status_code in (401, 403):
+        return False, "unauthorized"
+    return False, f"http_{resp.status_code}"
+

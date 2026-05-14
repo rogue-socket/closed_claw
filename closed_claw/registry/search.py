@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from closed_claw.config import Settings
 from closed_claw.registry.store import SearchCandidate
+from closed_claw.tools.executor import TOOL_REGISTRY
 
 logger = logging.getLogger("closed_claw.registry.search")
 
@@ -179,6 +180,23 @@ class LLMReranker:
         return out
 
 
+def _build_tool_catalog(allowed: list[str]) -> str:
+    entries = []
+    for name in allowed:
+        spec = TOOL_REGISTRY.get(name)
+        if not spec:
+            continue
+        entries.append(
+            {
+                "name": name,
+                "description": spec.get("description", ""),
+                "args_schema": spec.get("args_schema", {}),
+                "side_effects": spec.get("side_effects", False),
+            }
+        )
+    return json.dumps(entries, indent=2)
+
+
 # Canonical base skill module IDs — kept in sync with agents/skills/*.md files.
 _BASE_SKILL_IDS = [
     "terminal",
@@ -189,6 +207,116 @@ _BASE_SKILL_IDS = [
     "sql_databases",
     "data_analysis",
 ]
+
+
+# Short, faithful descriptions of each skill module's actual scope. Used to
+# anchor LLM profile generation so it cannot invent capabilities for bare IDs.
+# Underlying agents/skills/<id>.md files do not exist yet; descriptions here
+# are the only ground truth available to the prompt.
+_BASE_SKILL_DESCRIPTIONS: dict[str, str] = {
+    "terminal": "Run shell commands via the `terminal` tool.",
+    "python_scripting": "Execute Python snippets via the `python_exec` tool.",
+    "git": "Run git CLI commands via the `terminal` tool (no dedicated git tool).",
+    "file_system": "Read, write, and list files via the `file_io` tool.",
+    "web_http": "Fetch HTTP/HTTPS URLs via the `web_fetch` tool (no auth flows).",
+    "sql_databases": "Run read-only SQL via the `sql_query` tool.",
+    "data_analysis": "Process and summarise data via `python_exec` (no specialised lib guarantees).",
+}
+
+
+def _build_skill_catalog() -> str:
+    entries = [
+        {"skill_id": sid, "description": _BASE_SKILL_DESCRIPTIONS.get(sid, "")}
+        for sid in _BASE_SKILL_IDS
+    ]
+    return json.dumps(entries, indent=2)
+
+
+# Canonical role tags derived deterministically from task + description text.
+# Adding these collapses LLM-driven tag drift so the reuse tag-overlap filter
+# fires reliably on semantically-equivalent roles. Patterns are evaluated
+# against `(task + " " + description).lower()`. Multiple tags may fire per
+# profile; reuse-matching only requires non-empty overlap.
+_CANONICAL_ROLE_RULES: list[tuple[str, list[str]]] = [
+    ("fs.path", [
+        r"absolute path",
+        r"find\b.*\bpath",
+        r"locate\b.*\b(folder|directory|path)",
+        r"where\b.*\b(folder|directory)\b",
+    ]),
+    ("fs.list", [
+        r"\blist the files\b",
+        r"\blist\b.*\b(contents|files|directory)\b",
+        r"what'?s (in|inside)\b",
+        r"enumerate\b",
+        r"top-level items",
+        r"show me what'?s inside",
+        r"display the contents of (the )?(.* )?(directory|folder|root)",
+        r"contents of (the )?(.* )?(directory|folder|root)",
+    ]),
+    ("fs.read", [
+        r"read\b.*\b(content|file|text|/)",
+        r"\bopen\b.*\b(file|/)",
+        r"print\b.*\b(content|text|file)",
+        r"show me what'?s written",
+        r"display the text\b",
+        r"\.txt\b", r"\.md\b", r"\.bashrc\b", r"/etc/",
+    ]),
+    ("fs.write", [
+        r"create\b.*\b(folder|directory)\b",
+        r"\bmake\b.*\b(directory|folder)\b",
+        r"\bnew directory\b",
+        r"set up\b.*\b(folder|directory)\b",
+        r"add\b.*\bdirectory\b",
+        r"write\b.*\b(file|to /)",
+    ]),
+    ("db.write", [
+        r"create\b.*\bsqlite\b",
+        r"create\b.*\bdatabase\b",
+        r"build\b.*\bsqlite\b",
+        r"initialize\b.*\bsqlite\b",
+        r"fresh sqlite\b",
+        r"\bmake\b.*\bsqlite\b",
+        r"\binsert\b.*\binto\b",
+    ]),
+    ("db.read", [
+        r"\bselect\b",
+        r"count\(",
+        r"sum\(",
+        r"max\(",
+        r"min\(",
+        r"avg\(",
+        r"compute\s+(the\s+)?(sum|count|avg|max|min)",
+        r"get all rows\b",
+        r"\bdistinct\b",
+        r"\bquery\b.*\b(database|sqlite|table)",
+    ]),
+    ("http.fetch", [
+        r"\bfetch\b",
+        r"\bget\b\s+https?\b",
+        r"\bdownload\b",
+        r"https?://",
+        r"\bretrieve\b",
+    ]),
+]
+
+
+def _derive_canonical_tags(task: str, description: str, tools: list[str]) -> list[str]:
+    """Deterministically derive canonical tags from task + description + tools.
+
+    Returns role-domain tags (e.g., `fs.list`, `db.write`) and tool tags
+    (e.g., `tool.terminal`). These augment the LLM's free-form `tags` so
+    semantically-equivalent roles share a stable tag fingerprint.
+    """
+    text = f"{task}\n{description}".lower()
+    out: list[str] = []
+    for tag, patterns in _CANONICAL_ROLE_RULES:
+        for pat in patterns:
+            if re.search(pat, text):
+                out.append(tag)
+                break
+    out.extend(f"tool.{t}" for t in tools)
+    return out
 
 
 def generate_agent_profile(
@@ -214,13 +342,20 @@ def generate_agent_profile(
             f"No API key found for provider {provider!r}. Set the matching key in .env."
         )
 
+    tool_catalog = _build_tool_catalog(supported_tools)
     prompt = (
         "You create reusable capability profiles for specialist agents.\n"
         "Given a user task, return JSON only with keys:\n"
         "profile_id, name_prefix, description, tools_allowlist, tags, skill_md, "
         "skill_ids, api_capabilities, requires_approval_for.\n"
-        f"Allowed tools: {json.dumps(supported_tools)}\n"
-        f"Available base skill modules (skill_ids): {json.dumps(_BASE_SKILL_IDS)}\n"
+        f"Allowed tools (names only — pick from these): {json.dumps(supported_tools)}\n"
+        f"Tool catalog (descriptions, args_schema, and constraints — "
+        f"choose tools whose actual capabilities match the role, "
+        f"and reflect these constraints accurately in skill_md):\n{tool_catalog}\n"
+        f"Base skill modules (skill_id + actual scope — pick only those whose "
+        f"described scope matches the role, and reflect these constraints in "
+        f"skill_md; do NOT invent capabilities beyond what is described):\n"
+        f"{_build_skill_catalog()}\n"
         "Rules:\n"
         "- profile must be reusable and capability-oriented, not a one-off task label.\n"
         "- name_prefix should be concise (2-5 words).\n"
@@ -628,7 +763,8 @@ def _normalize_profile_payload(
     requested_tags = payload.get("tags", [])
     tags = [t for t in requested_tags if isinstance(t, str) and t.strip()]
     tags = [_slug(t) for t in tags if _slug(t)]
-    tags = list(dict.fromkeys(["auto", "capability", *tags]))
+    canonical = _derive_canonical_tags(task=task, description=raw_desc, tools=tools)
+    tags = list(dict.fromkeys(["auto", "capability", *tags, *canonical]))
 
     profile_id = _slug(str(payload.get("profile_id", ""))) or _slug(name_prefix)
     skill_md = str(payload.get("skill_md", "")).strip()

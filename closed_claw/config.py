@@ -73,6 +73,11 @@ class Settings:
         """Run from env."""
         cwd = Path.cwd()
         dotenv = _load_dotenv(cwd / ".env")
+        # Propagate .env values into os.environ so code paths that read via
+        # os.getenv directly (EmbeddingProvider, agent subprocesses) see them.
+        # Existing os.environ entries win — never overwrite an explicit shell var.
+        for k, v in dotenv.items():
+            os.environ.setdefault(k, v)
         paid = _getenv("CLOSED_CLAW_PAID_API_PROVIDERS", "", dotenv)
         provider = _getenv("CLOSED_CLAW_LLM_PROVIDER", "siemens", dotenv).lower()
         extra_paths_raw = _getenv("CLOSED_CLAW_EXTRA_ALLOWED_PATHS", "", dotenv)

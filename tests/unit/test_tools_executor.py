@@ -24,6 +24,43 @@ def test_terminal_tool(tmp_path: Path):
     assert "hi" in out["stdout"]
 
 
+def test_workspace_root_must_exist(tmp_path: Path):
+    """ToolExecutor raises a clear error when workspace_root is missing."""
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(FileNotFoundError, match="workspace_root does not exist"):
+        ToolExecutor(workspace_root=missing)
+
+
+def test_workspace_root_must_be_directory(tmp_path: Path):
+    """ToolExecutor rejects a file as workspace_root."""
+    a_file = tmp_path / "file.txt"
+    a_file.write_text("x")
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        ToolExecutor(workspace_root=a_file)
+
+
+def test_safe_path_expands_workspace_placeholder(tmp_path: Path):
+    """`$WORKSPACE` and `${WORKSPACE}` in path args are substituted with the
+    resolved workspace root, so LLMs that pass the literal token still get
+    valid path arguments."""
+    executor = ToolExecutor(workspace_root=tmp_path)
+    (tmp_path / "hi.txt").write_text("hello", encoding="utf-8")
+
+    out = executor.execute(
+        "file_io",
+        {"op": "read", "path": "$WORKSPACE/hi.txt"},
+        allowlist=["file_io"],
+    )
+    assert out["content"] == "hello"
+
+    out2 = executor.execute(
+        "file_io",
+        {"op": "read", "path": "${WORKSPACE}/hi.txt"},
+        allowlist=["file_io"],
+    )
+    assert out2["content"] == "hello"
+
+
 def test_tool_blocked(tmp_path: Path):
     """Test tool blocked."""
     executor = ToolExecutor(workspace_root=tmp_path)
